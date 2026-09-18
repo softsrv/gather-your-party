@@ -55,11 +55,20 @@ templ GameList(games []steamapi.Game) {
 }
 
 templ FriendsList(friends []steamapi.Player) {
-	<ul>
-		for _, item := range friends {
-			<li><img src={ item.AvatarSmall }/>{ item.PersonaName }</li>
-		}
-	</ul>
+	<form hx-get="/frag/shared" hx-target="#game-list">
+		<ul>
+			for _, item := range friends {
+				<li><input type="checkbox" name="friendID" value={ item.SteamID }/><img src={ item.AvatarSmall }/>{ item.PersonaName }</li>
+			}
+		</ul>
+		<button type="submit" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3  rounded-full tracking-wide font-semibold  shadow-lg cursor-pointer transition ease-in duration-200">
+			Show games in common
+		</button>
+	</form>
+}
+
+templ SharedGamesPrompt() {
+	<p>Pick at least one friend, then click "Show games in common".</p>
 }
 
 templ Landing(isLoggedIn bool) {
