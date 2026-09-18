@@ -89,6 +89,37 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 	template.FriendsList(friends).Render(ctx, w)
 }
 
+func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+	steamIDValue := ctx.Context.Value("steamID")
+	if steamIDValue == nil {
+		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
+		return
+	}
+
+	playerId := steamIDValue.(string)
+	friendIDs := r.URL.Query()["friendID"]
+	if len(friendIDs) == 0 {
+		template.SharedGamesPrompt().Render(ctx, w)
+		return
+	}
+	ids := sharedGameIDs(playerId, friendIDs)
+
+	deadline := time.Now().Add(5000 * time.Millisecond)
+	newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
+	defer cancelCtx()
+	games, err := SteamService.SharedGames(newCtx, ids)
+	if err != nil {
+		http.NotFound(w, r)
+	}
+
+	template.GameList(games).Render(ctx, w)
+}
+
+func sharedGameIDs(playerId string, friendIDs []string) []string {
+	return append([]string{playerId}, friendIDs...)
+}
+
 func Login(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/login" {
 		http.NotFound(w, r)
