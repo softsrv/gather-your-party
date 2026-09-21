@@ -31,6 +31,9 @@ func main() {
 	mux.HandleFunc("GET /frag/friends", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.FriendsList, middleware.LoadSteamId)
 	})
+	mux.HandleFunc("POST /frag/shared-games", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, view.SharedGamesList, middleware.LoadSteamId)
+	})
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.PostLoginRedirect)
 	})

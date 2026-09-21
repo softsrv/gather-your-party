@@ -55,6 +55,20 @@ templ TextAndTitle(title string, text string) {
 	</div>
 }
 
+templ ErrorMessage(msg string) {
+	@ErrorMessages([]string{msg})
+}
+
+templ ErrorMessages(msgs []string) {
+	<div class="alert alert-error text-error-content" role="alert">
+		<ul>
+			for _, msg := range msgs {
+				<li>{ msg }</li>
+			}
+		</ul>
+	</div>
+}
+
 templ Signin() {
 	<div class="min-h-screen sm:flex sm:flex-row mx-0 justify-center">
 		<div class="flex-col flex  self-center p-10 sm:max-w-5xl xl:max-w-2xl  z-10">
