@@ -46,6 +46,14 @@ templ Home(player steamapi.Player, title string, pageName PageState) {
 	}
 }
 
+templ ErrorMessage(msg string) {
+	@component.ErrorMessage(msg)
+}
+
+templ ErrorMessages(msgs []string) {
+	@component.ErrorMessages(msgs)
+}
+
 templ GameList(games []steamapi.Game) {
 	<ul>
 		for _, item := range games {
@@ -54,12 +62,28 @@ templ GameList(games []steamapi.Game) {
 	</ul>
 }
 
+templ SharedGamesList(games []steamapi.Game) {
+	@GameList(games)
+}
+
 templ FriendsList(friends []steamapi.Player) {
-	<ul>
-		for _, item := range friends {
-			<li><img src={ item.AvatarSmall }/>{ item.PersonaName }</li>
-		}
-	</ul>
+	<form id="friends-list-form">
+		<ul>
+			for _, item := range friends {
+				<li>
+					<label class="flex items-center gap-2">
+						<input type="checkbox" name="friendID" value={ item.SteamID }/>
+						<img src={ item.AvatarSmall }/>
+						<span>{ item.PersonaName }</span>
+					</label>
+				</li>
+			}
+		</ul>
+		<button type="button" hx-post="/frag/shared-games" hx-target="#shared-games-results" hx-include="#friends-list-form" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3 rounded-full tracking-wide font-semibold shadow-lg cursor-pointer transition ease-in duration-200">
+			Show Shared Games
+		</button>
+	</form>
+	<div id="shared-games-results"></div>
 }
 
 templ Landing(isLoggedIn bool) {
