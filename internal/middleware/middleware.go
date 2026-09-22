@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"fmt"
+	"gather-your-party/internal/store"
 	"net/http"
 	"time"
 )
@@ -10,16 +11,21 @@ import (
 type CustomContext struct {
 	context.Context
 	StartTime time.Time
+	Store     *store.Store // CLM-4: store is reachable from the handler/view path
 }
 
 type CustomHandler func(ctx *CustomContext, w http.ResponseWriter, r *http.Request)
 type CustomMiddleware func(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error
 
-func Chain(w http.ResponseWriter, r *http.Request, handler CustomHandler, middleware ...CustomMiddleware) {
+// Chain builds a CustomContext (with the injected store) and runs
+// the middleware chain before calling the handler. The store parameter
+// wires the persistence layer into every handler that receives a *CustomContext.
+func Chain(st *store.Store, w http.ResponseWriter, r *http.Request, handler CustomHandler, middleware ...CustomMiddleware) {
 	fmt.Println("Starting teh middleware chain")
 	customContext := &CustomContext{
 		Context:   context.Background(),
 		StartTime: time.Now(),
+		Store:     st, // CLM-4: injected at request-path construction time
 	}
 	fmt.Println("done creating custom context")
 	for _, mw := range middleware {

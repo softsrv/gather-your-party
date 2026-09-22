@@ -68,12 +68,18 @@ func (s *Store) UpsertUser(ctx context.Context, steamID64, persona, avatarURL st
 	})
 }
 
+// sessionExpiry returns the expiry time for a new session: 30 days after now.
+// Extracted as a pure helper so the 30-day rule is unit-testable without a DB.
+func sessionExpiry(now time.Time) time.Time {
+	return now.Add(30 * 24 * time.Hour)
+}
+
 // CreateSession inserts a new session row with an opaque token and an
 // expiry set 30 days from now. Returns the inserted session.
 //
 // CLM-10: satisfies the create-session-with-30-day-expiry requirement.
 func (s *Store) CreateSession(ctx context.Context, token string, userID int64) (Session, error) {
-	expiry := time.Now().Add(30 * 24 * time.Hour)
+	expiry := sessionExpiry(time.Now())
 	const q = `
 		INSERT INTO sessions (token, user_id, expires_at)
 		VALUES ($1, $2, $3)
