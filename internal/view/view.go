@@ -36,7 +36,7 @@ func Home(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request)
 
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
 	fmt.Println("Created the service!")
-	steamIDValue := ctx.Context.Value("steamID")
+	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
 		return
@@ -60,7 +60,7 @@ func Home(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request)
 
 func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Context.Value("steamID")
+	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
 		return
@@ -79,7 +79,7 @@ func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Req
 
 func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Context.Value("steamID")
+	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
 		return
@@ -101,7 +101,7 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 
 func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Context.Value("steamID")
+	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
 		return

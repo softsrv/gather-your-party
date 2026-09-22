@@ -12,6 +12,8 @@ type CustomContext struct {
 	StartTime time.Time
 }
 
+type SteamID struct{}
+
 type CustomHandler func(ctx *CustomContext, w http.ResponseWriter, r *http.Request)
 type CustomMiddleware func(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error
 
@@ -67,6 +69,6 @@ func LoadSteamId(ctx *CustomContext, w http.ResponseWriter, r *http.Request) err
 	}
 	fmt.Printf("got the cookie: %s\n", cookie.Value)
 
-	ctx.Context = context.WithValue(ctx.Context, "steamID", cookie.Value)
+	ctx.Context = context.WithValue(ctx.Context, SteamID{}, cookie.Value)
 	return nil
 }
