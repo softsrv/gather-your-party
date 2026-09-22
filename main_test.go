@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,4 +60,61 @@ func TestPoolWiring_ValidDSN(t *testing.T) {
 		t.Fatal("pgxpool.New() returned nil pool, want non-nil")
 	}
 	pool.Close()
+}
+
+// TestValidateConfig_EmptyAppBaseURLFailsFast asserts that boot rejects
+// an empty APP_BASE_URL (CLM-3). If validateConfig returns nil, the
+// process would start and the auth flow would be forced to derive
+// realm/return_to from something else — which CLM-2 forbids.
+func TestValidateConfig_EmptyAppBaseURLFailsFast(t *testing.T) {
+	cfg := config{
+		databaseURL:   "postgres://user:pass@localhost:5432/db",
+		appBaseURL:    "",
+		sessionSecret: "s3cret",
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("validateConfig returned nil for empty APP_BASE_URL; want error (CLM-3)")
+	}
+	if !strings.Contains(err.Error(), "APP_BASE_URL") {
+		t.Errorf("error %q does not mention APP_BASE_URL", err.Error())
+	}
+}
+
+// TestValidateConfig_EmptyDatabaseURLFailsFast preserves the existing
+// fail-fast on DATABASE_URL (base branch behaviour).
+func TestValidateConfig_EmptyDatabaseURLFailsFast(t *testing.T) {
+	cfg := config{
+		databaseURL:   "",
+		appBaseURL:    "http://x",
+		sessionSecret: "s",
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("validateConfig returned nil for empty DATABASE_URL; want error")
+	}
+}
+
+// TestValidateConfig_EmptySessionSecretFailsFast asserts that boot
+// rejects an empty SESSION_SECRET (needed for CLM-10 signing).
+func TestValidateConfig_EmptySessionSecretFailsFast(t *testing.T) {
+	cfg := config{
+		databaseURL:   "postgres://x",
+		appBaseURL:    "http://x",
+		sessionSecret: "",
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("validateConfig returned nil for empty SESSION_SECRET; want error")
+	}
+}
+
+// TestValidateConfig_AllSet passes.
+func TestValidateConfig_AllSet(t *testing.T) {
+	cfg := config{
+		databaseURL:   "postgres://x",
+		appBaseURL:    "http://x",
+		sessionSecret: "s",
+	}
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("validateConfig returned err %v for populated cfg", err)
+	}
 }

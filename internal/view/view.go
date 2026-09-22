@@ -170,13 +170,7 @@ func Login(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request
 	template.Login().Render(ctx, w)
 }
 
-func PostLoginRedirect(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:    "steam_id",
-		Value:   r.PostFormValue("steamID"),
-		Expires: time.Now().Add(120 * time.Second),
-	})
-	w.Header().Set("HX-redirect", "/")
-
-	http.RedirectHandler("/", http.StatusSeeOther)
-}
+// PostLoginRedirect has been REMOVED. It previously set an unsigned
+// plaintext "steam_id" cookie from r.PostFormValue, which allowed a user
+// to log in as any SteamID. The signed-session flow (LoginRedirect →
+// SteamCallback in auth.go) replaces it. CLM-17 MUST-forbid.
