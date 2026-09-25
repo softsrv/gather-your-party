@@ -1,18 +1,48 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
 	"gather-your-party/internal/view"
 	"net/http"
 	"os"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
 
-func main() {
+// appConfig holds settings for the future session-security and OpenID handlers.
+type appConfig struct {
+	SessionSecret string
+	AppBaseURL    string
+}
 
+type application struct {
+	store  *db.Store
+	config appConfig
+}
+
+func main() {
 	_ = godotenv.Load()
+	config := appConfig{
+		SessionSecret: os.Getenv("SESSION_SECRET"),
+		AppBaseURL:    os.Getenv("APP_BASE_URL"),
+	}
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		// Do not log the DSN or parsing error, which can contain credentials.
+		fmt.Fprintln(os.Stderr, "unable to initialize database pool")
+		return
+	}
+	defer pool.Close()
+
+	app := application{store: db.New(pool), config: config}
+	app.serve()
+}
+
+func (app *application) serve() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /favicon.ico", view.ServeFavicon)
