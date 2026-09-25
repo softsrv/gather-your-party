@@ -15,8 +15,8 @@ precedence over `.env` values loaded by godotenv.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Provider's Postgres connection URL, including required TLS options. |
-| `SESSION_SECRET` | High-entropy secret reserved for the upcoming session-security code. |
-| `APP_BASE_URL` | Public application origin, reserved for upcoming authentication callbacks. |
+| `SESSION_SECRET` | Required high-entropy secret that signs the session cookie with HMAC-SHA256. |
+| `APP_BASE_URL` | Public origin used for the Steam OpenID realm/return_to, including behind a TLS-terminating reverse proxy (e.g. `https://example.com`, no trailing slash). |
 | `STEAM_API_KEY` | Steam Web API key for profile and game requests. |
 | `LISTEN_ADDR` | HTTP port, e.g. `8080` (not a host:port pair). |
 
@@ -35,10 +35,16 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_init.sql
 The migration creates users keyed by a unique SteamID64 and sessions with a
 user foreign key and expiry. `internal/db` exposes an upsert that requires a
 caller-verified SteamID64 and session creation using a random 256-bit token,
-expiring after seven days. Neither write path is called by a route yet.
-The secret and public origin are retained in application configuration for later
-consumers; this change does not implement authentication or secure the existing
-login flow. Do not treat this persistence layer as completed authentication.
+expiring after seven days. The Steam OpenID callback validates the assertion
+with Steam, fetches the verified user's profile, upserts the user, and creates a
+session. It sets the opaque token with an HMAC-SHA256 signature in an HttpOnly,
+Secure, SameSite=Lax cookie. Set `SESSION_SECRET` to a high-entropy secret and
+`APP_BASE_URL` to the public origin used for the OpenID realm and callback URL;
+request Host and proxy headers are not used to construct that origin. Deployed
+sign-in requires HTTPS, including when TLS terminates at a reverse proxy.
+The old Steam-ID entry form and GET/POST `/login` handlers have been removed.
+This step establishes the cookie only; it does not yet provide authenticated
+request handling.
 
 ## Verification
 

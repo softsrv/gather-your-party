@@ -22,7 +22,7 @@ func Navbar(player steamapi.Player, username string) templ.Component {
 		if player.PersonaName != "" {
 			_, err = fmt.Fprintf(w, `<li><details><summary><img src="%s"> %s</summary><ul class="p-2 bg-base-100 rounded-t-none"><li><a>profile</a></li><li><a>log out</a></li></ul></details></li>`, html.EscapeString(player.AvatarSmall), html.EscapeString(player.PersonaName))
 		} else {
-			_, err = io.WriteString(w, `<li><a href="/login">Login</a></li>`)
+			_, err = io.WriteString(w, `<li><a href="/auth/steam">Login</a></li>`)
 		}
 		if err != nil {
 			return err
@@ -74,7 +74,7 @@ func ErrorMessages(msgs []string) templ.Component {
 
 func Signin() templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, err := io.WriteString(w, `<div class="min-h-screen sm:flex sm:flex-row mx-0 justify-center"><div class="flex-col flex  self-center p-10 sm:max-w-5xl xl:max-w-2xl  z-10"><div class="self-start hidden lg:flex flex-col  text-white"><h1 class="mb-3 font-bold text-5xl">Gather Your Party </h1><p class="pr-3">log in here</p></div></div><div class="flex justify-center self-center  z-10"><div class="p-12 bg-white mx-auto rounded-2xl w-100 "><div class="mb-4"><h3 class="font-semibold text-2xl text-gray-800">Sign In </h3><p class="text-gray-500">Please provide your steam ID. You can find this on your Steam account profile page.</p></div><div class="space-y-5"><form id="login" hx-post="/login"><div class="mb-4"><div class="space-y-2"><label class="mb-5 text-sm font-medium text-gray-700 tracking-wide">SteamID</label> <input name="steamID" class="w-full content-center text-base px-4 py-2 border  border-gray-300 rounded-lg focus:outline-none focus:border-green-400" placeholder="Enter your SteamID"></div></div><div class="mb-4"><div><button type="submit" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3  rounded-full tracking-wide font-semibold  shadow-lg cursor-pointer transition ease-in duration-200">Sign in</button></div></div></form></div><div class="pt-5 text-center text-gray-400 text-xs"><span>Copyright © 2021-2022 <a href="https://codepen.io/uidesignhub" rel="" target="_blank" title="Ajimon" class="text-green hover:text-green-500 ">AJI</a></span></div></div></div></div>`)
+		_, err := io.WriteString(w, `<div class="min-h-screen sm:flex sm:flex-row mx-0 justify-center"><div class="flex-col flex  self-center p-10 sm:max-w-5xl xl:max-w-2xl  z-10"><div class="self-start hidden lg:flex flex-col  text-white"><h1 class="mb-3 font-bold text-5xl">Gather Your Party </h1><p class="pr-3">log in here</p></div></div><div class="flex justify-center self-center  z-10"><div class="p-12 bg-white mx-auto rounded-2xl w-100 "><div class="mb-4"><h3 class="font-semibold text-2xl text-gray-800">Sign In </h3><p class="text-gray-500">Sign in with your Steam account to continue.</p></div><div class="space-y-5"><a href="/auth/steam" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3 rounded-full tracking-wide font-semibold shadow-lg cursor-pointer transition ease-in duration-200">Sign in through Steam</a></div><div class="pt-5 text-center text-gray-400 text-xs"><span>Copyright © 2021-2022 <a href="https://codepen.io/uidesignhub" rel="" target="_blank" title="Ajimon" class="text-green hover:text-green-500 ">AJI</a></span></div></div></div></div>`)
 		return err
 	})
 }

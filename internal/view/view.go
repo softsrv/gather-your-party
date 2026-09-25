@@ -161,22 +161,3 @@ func noGamesMessages(ids []string, roster []steamapi.Player) []string {
 	}
 	return messages
 }
-
-func Login(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/login" {
-		http.NotFound(w, r)
-		return
-	}
-	template.Login().Render(ctx, w)
-}
-
-func PostLoginRedirect(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:    "steam_id",
-		Value:   r.PostFormValue("steamID"),
-		Expires: time.Now().Add(120 * time.Second),
-	})
-	w.Header().Set("HX-redirect", "/")
-
-	http.RedirectHandler("/", http.StatusSeeOther)
-}
