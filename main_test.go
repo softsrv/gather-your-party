@@ -144,7 +144,7 @@ func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 			t.Error(err)
 		}
 		received <- r.PostForm
-		io.WriteString(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n")
+		_, _ = io.WriteString(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n")
 	}))
 	defer server.Close()
 	oldEndpoint := steamOpenIDEndpoint
