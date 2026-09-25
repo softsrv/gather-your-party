@@ -98,6 +98,117 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return nil
 }
 
+// ErrStepDownNotAllowed indicates that leadership cannot be handed to this member.
+var ErrStepDownNotAllowed = errors.New("step down not allowed")
+
+// CreateParty makes the creator the leader and sole member atomically.
+func (s *Store) CreateParty(ctx context.Context, name string, leaderUserID int64) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin create party: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // Commit closes the transaction on success.
+
+	var partyID string
+	if err := tx.QueryRow(ctx, `INSERT INTO parties (name, leader_id) VALUES ($1, $2) RETURNING id::text`, name, leaderUserID).Scan(&partyID); err != nil {
+		return "", fmt.Errorf("create party: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, partyID, leaderUserID); err != nil {
+		return "", fmt.Errorf("create leader membership: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit create party: %w", err)
+	}
+	return partyID, nil
+}
+
+// LeaveParty removes only the acting user's membership. Lifecycle writers lock
+// the party first, serializing leave and step down decisions for that party.
+// Future membership writers must use the same party-first locking order.
+func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin leave party: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // Commit closes the transaction on success.
+
+	var leaderID int64
+	err = tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&leaderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock party for leave: %w", err)
+	}
+	removed, err := tx.Exec(ctx, `DELETE FROM memberships WHERE party_id = $1 AND user_id = $2`, partyID, actingUserID)
+	if err != nil {
+		return fmt.Errorf("leave party: %w", err)
+	}
+	// A non-member (including a repeated request) cannot change the party.
+	if removed.RowsAffected() == 0 {
+		return nil
+	}
+	var remaining int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, partyID).Scan(&remaining); err != nil {
+		return fmt.Errorf("count remaining memberships: %w", err)
+	}
+	if remaining == 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM parties WHERE id = $1`, partyID); err != nil {
+			return fmt.Errorf("remove empty party: %w", err)
+		}
+	} else if leaderID == actingUserID {
+		// Earliest seniority decides automatic succession, with a stable tie-break.
+		if _, err := tx.Exec(ctx, `UPDATE parties SET leader_id = (
+			SELECT user_id FROM memberships WHERE party_id = $1 ORDER BY joined_at, user_id LIMIT 1
+		) WHERE id = $1`, partyID); err != nil {
+			return fmt.Errorf("automatic succession: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit leave party: %w", err)
+	}
+	return nil
+}
+
+// StepDown transfers leadership to the caller-chosen member without removing
+// the former leader's membership. It is unavailable in a party of one.
+func (s *Store) StepDown(ctx context.Context, partyID string, actingLeaderUserID, targetUserID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin step down: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // Commit closes the transaction on success.
+
+	var leaderID int64
+	err = tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&leaderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrStepDownNotAllowed
+	}
+	if err != nil {
+		return fmt.Errorf("lock party for step down: %w", err)
+	}
+	if leaderID != actingLeaderUserID {
+		return ErrStepDownNotAllowed
+	}
+	var count int
+	var targetIsMember bool
+	if err := tx.QueryRow(ctx, `SELECT count(*), EXISTS (
+		SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2
+	) FROM memberships WHERE party_id = $1`, partyID, targetUserID).Scan(&count, &targetIsMember); err != nil {
+		return fmt.Errorf("check step down membership: %w", err)
+	}
+	if count <= 1 || !targetIsMember {
+		return ErrStepDownNotAllowed
+	}
+	if _, err := tx.Exec(ctx, `UPDATE parties SET leader_id = $2 WHERE id = $1`, partyID, targetUserID); err != nil {
+		return fmt.Errorf("step down: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit step down: %w", err)
+	}
+	return nil
+}
+
 func newSessionToken() (string, error) {
 	var entropy [32]byte
 	if _, err := rand.Read(entropy[:]); err != nil {

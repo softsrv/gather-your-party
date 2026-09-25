@@ -4,15 +4,128 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
 	"gather-your-party/internal/template"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/softsrv/steamapi/steamapi"
 )
+
+// PartyStore is the persistence surface needed by party action handlers.
+// Session-only handlers keep their existing, narrower interface.
+type PartyStore interface {
+	ResolveUserID(context.Context, string) (int64, bool, error)
+	CreateParty(context.Context, string, int64) (string, error)
+	LeaveParty(context.Context, string, int64) error
+	StepDown(context.Context, string, int64, int64) error
+}
+
+// PartyActions supplies store-backed handlers compatible with middleware.Chain.
+type PartyActions struct {
+	Store PartyStore
+}
+
+func (a PartyActions) actingUser(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (int64, bool) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return 0, false
+	}
+	steamID64, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	if !ok || steamID64 == "" {
+		http.Error(w, "sign in required", http.StatusUnauthorized)
+		return 0, false
+	}
+	userID, found, err := a.Store.ResolveUserID(r.Context(), steamID64)
+	if err != nil {
+		http.Error(w, "unable to resolve user", http.StatusInternalServerError)
+		return 0, false
+	}
+	if !found {
+		http.Error(w, "sign in required", http.StatusUnauthorized)
+		return 0, false
+	}
+	return userID, true
+}
+
+func partyActionComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", "/parties")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, "/parties", http.StatusSeeOther)
+}
+
+func (a PartyActions) CreateParty(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := a.actingUser(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid party form", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.PostForm.Get("name"))
+	if name == "" {
+		http.Error(w, "party name required", http.StatusBadRequest)
+		return
+	}
+	if _, err := a.Store.CreateParty(r.Context(), name, userID); err != nil {
+		http.Error(w, "unable to create party", http.StatusInternalServerError)
+		return
+	}
+	partyActionComplete(w, r)
+}
+
+func (a PartyActions) LeaveParty(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := a.actingUser(ctx, w, r)
+	if !ok {
+		return
+	}
+	partyID := r.PathValue("partyID")
+	if partyID == "" {
+		http.Error(w, "party required", http.StatusBadRequest)
+		return
+	}
+	if err := a.Store.LeaveParty(r.Context(), partyID, userID); err != nil {
+		http.Error(w, "unable to leave party", http.StatusInternalServerError)
+		return
+	}
+	partyActionComplete(w, r)
+}
+
+func (a PartyActions) StepDown(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := a.actingUser(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid step down form", http.StatusBadRequest)
+		return
+	}
+	partyID := r.PathValue("partyID")
+	targetID, err := strconv.ParseInt(r.PostForm.Get("targetUserID"), 10, 64)
+	if partyID == "" || err != nil || targetID <= 0 {
+		http.Error(w, "party and target member required", http.StatusBadRequest)
+		return
+	}
+	if err := a.Store.StepDown(r.Context(), partyID, userID, targetID); err != nil {
+		if errors.Is(err, db.ErrStepDownNotAllowed) {
+			http.Error(w, "step down not allowed", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "unable to step down", http.StatusInternalServerError)
+		return
+	}
+	partyActionComplete(w, r)
+}
 
 const noGamesMessageFormat = "no games found for user %s. Their list may be private"
 

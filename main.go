@@ -38,8 +38,9 @@ type sessionStore interface {
 }
 
 type application struct {
-	store  sessionStore
-	config appConfig
+	store      sessionStore
+	partyStore view.PartyStore
+	config     appConfig
 }
 
 func main() {
@@ -56,7 +57,8 @@ func main() {
 	}
 	defer pool.Close()
 
-	app := application{store: db.New(pool), config: config}
+	store := db.New(pool)
+	app := application{store: store, partyStore: store, config: config}
 	app.serve()
 }
 
@@ -228,6 +230,18 @@ func (app *application) serve() {
 	})
 	mux.HandleFunc("POST /frag/shared-games", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
+	})
+
+	// The parties page is registered separately; these are only lifecycle actions.
+	partyActions := view.PartyActions{Store: app.partyStore}
+	mux.HandleFunc("POST /parties", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, partyActions.CreateParty, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, partyActions.LeaveParty, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/step-down", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, partyActions.StepDown, auth.LoadSteamId)
 	})
 
 	fmt.Printf("server is running on port %s\n", os.Getenv("LISTEN_ADDR"))

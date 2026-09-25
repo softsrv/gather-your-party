@@ -86,6 +86,42 @@ templ FriendsList(friends []steamapi.Player) {
 	<div id="shared-games-results"></div>
 }
 
+// LeaveConfirmation presents the only leave action behind a generic dialog.
+templ LeaveConfirmation(partyID string) {
+	<div>
+		<button type="button" class="btn" onclick="this.nextElementSibling.showModal()">Leave party</button>
+		<dialog aria-label="Leave party">
+			<p>Are you sure you want to leave this party?</p>
+			<button type="button" class="btn" hx-post={ "/parties/" + partyID + "/leave" } hx-swap="none">Confirm</button>
+			<button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+		</dialog>
+	</div>
+}
+
+// PartyMember identifies a selectable step-down target by users.id.
+type PartyMember struct {
+	UserID int64
+	Name   string
+}
+
+templ StepDownControl(partyID string, members []PartyMember) {
+	if len(members) <= 1 {
+		<button type="button" class="btn" disabled>Step down</button>
+	} else {
+		<form hx-post={ "/parties/" + partyID + "/step-down" } hx-swap="none">
+			<label>
+				New leader
+				<select name="targetUserID" required>
+					for _, member := range members {
+						<option value={ fmt.Sprint(member.UserID) }>{ member.Name }</option>
+					}
+				</select>
+			</label>
+			<button type="submit" class="btn">Step down</button>
+		</form>
+	}
+}
+
 templ Landing(isLoggedIn bool) {
 	@Base("Gather Your Party - Welcome!") {
 	}
