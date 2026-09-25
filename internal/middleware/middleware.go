@@ -34,7 +34,9 @@ func Chain(w http.ResponseWriter, r *http.Request, handler CustomHandler, middle
 	fmt.Println("done with middleware chain")
 	handler(customContext, w, r)
 	fmt.Println("done with hander")
-	Log(customContext, w, r)
+	if err := Log(customContext, w, r); err != nil {
+		fmt.Printf("logging error: %s\n", err)
+	}
 	fmt.Println("done with logger")
 }
 
@@ -46,13 +48,19 @@ func Log(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error {
 }
 
 func ParseForm(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error {
-	r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return err
+	}
 	fmt.Printf("%+v\n", r.Form)
 	return nil
 }
 
 func ParseMultipartForm(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error {
-	r.ParseMultipartForm(10 << 20)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return err
+	}
 	return nil
 }
 
