@@ -17,12 +17,12 @@ templ Navbar(player steamapi.Player, username string) {
 							</summary>
 							<ul class="p-2 bg-base-100 rounded-t-none">
 								<li><a>profile</a></li>
-								<li><a>log out</a></li>
+								<li><form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form></li>
 							</ul>
 						</details>
 					</li>
 				} else {
-					<li><a href="/login">Login</a></li>
+					<li><a href="/auth/steam">Login</a></li>
 				}
 			</ul>
 		</div>
@@ -83,26 +83,10 @@ templ Signin() {
 			<div class="p-12 bg-white mx-auto rounded-2xl w-100 ">
 				<div class="mb-4">
 					<h3 class="font-semibold text-2xl text-gray-800">Sign In </h3>
-					<p class="text-gray-500">Please provide your steam ID. You can find this on your Steam account profile page.</p>
+					<p class="text-gray-500">Sign in with your Steam account to continue.</p>
 				</div>
 				<div class="space-y-5">
-					<form id="login" hx-post="/login">
-						<div class="mb-4">
-							<div class="space-y-2">
-								<label class="mb-5 text-sm font-medium text-gray-700 tracking-wide">
-									SteamID
-								</label>
-								<input name="steamID" class="w-full content-center text-base px-4 py-2 border  border-gray-300 rounded-lg focus:outline-none focus:border-green-400" placeholder="Enter your SteamID"/>
-							</div>
-						</div>
-						<div class="mb-4">
-							<div>
-								<button type="submit" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3  rounded-full tracking-wide font-semibold  shadow-lg cursor-pointer transition ease-in duration-200">
-									Sign in
-								</button>
-							</div>
-						</div>
-					</form>
+					<a href="/auth/steam" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3 rounded-full tracking-wide font-semibold shadow-lg cursor-pointer transition ease-in duration-200">Sign in through Steam</a>
 				</div>
 				<div class="pt-5 text-center text-gray-400 text-xs">
 					<span>

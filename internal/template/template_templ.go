@@ -114,16 +114,3 @@ func FriendsList(friends []steamapi.Player) templ.Component {
 func Landing(isLoggedIn bool) templ.Component {
 	return Base("Gather Your Party - Welcome!")
 }
-
-func Login() templ.Component {
-	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		if _, err := io.WriteString(w, `<html data-theme="dim"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><script src="/static/script/htmx.min.js"></script><link rel="stylesheet" href="/static/css/output.css"><title>Gather Your Party - Login</title></head><body><main class="p-6 grid gap-4">`); err != nil {
-			return err
-		}
-		if err := component.Navbar(steamapi.Player{}, "").Render(ctx, w); err != nil {
-			return err
-		}
-		_, err := io.WriteString(w, `</main></body></html>`)
-		return err
-	})
-}

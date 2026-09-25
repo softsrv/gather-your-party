@@ -90,9 +90,3 @@ templ Landing(isLoggedIn bool) {
 	@Base("Gather Your Party - Welcome!") {
 	}
 }
-
-templ Login() {
-	@Base("Gather Your Party - Login") {
-		@component.Navbar(steamapi.Player{}, "")
-	}
-}

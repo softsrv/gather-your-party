@@ -2,8 +2,12 @@ package middleware
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -64,19 +68,46 @@ func ParseMultipartForm(ctx *CustomContext, w http.ResponseWriter, r *http.Reque
 	return nil
 }
 
-func LoadSteamId(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error {
-	fmt.Println("inside LoadSteamId middleware")
-	cookie, err := r.Cookie("steam_id")
+type SessionResolver interface {
+	ResolveSession(context.Context, string) (string, bool, error)
+}
 
-	if err != nil {
-		fmt.Println("got an error loading cookie")
-		if err == http.ErrNoCookie {
-			fmt.Println("cookie was not found")
-			return nil
-		}
+type Authenticator struct {
+	Resolver SessionResolver
+	Secret   []byte
+}
+
+func (a *Authenticator) LoadSteamId(ctx *CustomContext, w http.ResponseWriter, r *http.Request) error {
+	cookie, err := r.Cookie("session")
+	if err != nil || len(a.Secret) == 0 {
+		return nil
 	}
-	fmt.Printf("got the cookie: %s\n", cookie.Value)
-
-	ctx.Context = context.WithValue(ctx.Context, SteamID{}, cookie.Value)
+	token, macHex, ok := strings.Cut(cookie.Value, ".")
+	if !ok || token == "" {
+		return nil
+	}
+	gotMAC, err := hex.DecodeString(macHex)
+	if err != nil {
+		return nil
+	}
+	mac := hmac.New(sha256.New, a.Secret)
+	mac.Write([]byte(token))
+	if !hmac.Equal(mac.Sum(nil), gotMAC) {
+		return nil
+	}
+	steamID64, ok, err := a.Resolver.ResolveSession(r.Context(), token)
+	if err != nil || !ok {
+		return nil
+	}
+	ctx.Context = context.WithValue(ctx.Context, SteamID{}, steamID64)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    cookie.Value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+	})
 	return nil
 }
