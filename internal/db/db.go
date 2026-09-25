@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/softsrv/steamapi/steamapi"
 )
@@ -54,6 +56,31 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 		return "", fmt.Errorf("create session: %w", err)
 	}
 	return token, nil
+}
+
+// ResolveSession refreshes an unexpired session and returns its verified identity.
+func (s *Store) ResolveSession(ctx context.Context, token string) (string, bool, error) {
+	var steamID64 string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE sessions s SET expires_at = now() + interval '7 days'
+		FROM users u
+		WHERE s.token = $1 AND s.expires_at > now() AND s.user_id = u.id
+		RETURNING u.steam_id_64`, token).Scan(&steamID64)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve session: %w", err)
+	}
+	return steamID64, true, nil
+}
+
+// DeleteSession invalidates a session; an unknown token is already invalidated.
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
 }
 
 func newSessionToken() (string, error) {

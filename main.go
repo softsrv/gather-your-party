@@ -33,6 +33,8 @@ type appConfig struct {
 type sessionStore interface {
 	UpsertUser(context.Context, string, steamapi.Player) (int64, error)
 	CreateSession(context.Context, int64) (string, error)
+	ResolveSession(context.Context, string) (string, bool, error)
+	DeleteSession(context.Context, string) error
 }
 
 type application struct {
@@ -161,6 +163,26 @@ func (app *application) handleSteamCallback(w http.ResponseWriter, r *http.Reque
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+	})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie("session"); err == nil {
+		if separator := strings.LastIndex(cookie.Value, "."); separator > 0 {
+			// Clear the browser cookie even if server-side deletion fails.
+			_ = app.store.DeleteSession(r.Context(), cookie.Value[:separator])
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -187,23 +209,25 @@ func steamID64FromClaimedID(claimedID string) (string, error) {
 }
 
 func (app *application) serve() {
+	auth := &middleware.Authenticator{Resolver: app.store, Secret: []byte(app.config.SessionSecret)}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /favicon.ico", view.ServeFavicon)
 	mux.HandleFunc("GET /static/", view.ServeStaticFiles)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.Home, middleware.LoadSteamId)
+		middleware.Chain(w, r, view.Home, auth.LoadSteamId)
 	})
 	mux.HandleFunc("GET /auth/steam", app.handleSteamLogin)
 	mux.HandleFunc("GET /auth/steam/callback", app.handleSteamCallback)
+	mux.HandleFunc("POST /auth/steam/logout", app.handleLogout)
 	mux.HandleFunc("GET /frag/games", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.GamesList, middleware.LoadSteamId)
+		middleware.Chain(w, r, view.GamesList, auth.LoadSteamId)
 	})
 	mux.HandleFunc("GET /frag/friends", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.FriendsList, middleware.LoadSteamId)
+		middleware.Chain(w, r, view.FriendsList, auth.LoadSteamId)
 	})
 	mux.HandleFunc("POST /frag/shared-games", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.SharedGamesList, middleware.LoadSteamId)
+		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
 	})
 
 	fmt.Printf("server is running on port %s\n", os.Getenv("LISTEN_ADDR"))

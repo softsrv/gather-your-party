@@ -4,11 +4,17 @@ package db
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"gather-your-party/internal/middleware"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -123,10 +129,92 @@ func TestPersistence(t *testing.T) {
 	if invalidToken != "" {
 		t.Fatal("failed insert returned a usable token")
 	}
+	// Measure against database time so host clock skew cannot hide a bad lifetime.
+	assertSevenDays := func() time.Time {
+		t.Helper()
+		var expiry, now time.Time
+		if err := pool.QueryRow(ctx, `SELECT expires_at, now() FROM sessions WHERE token = $1`, token).Scan(&expiry, &now); err != nil {
+			t.Fatal(err)
+		}
+		if remaining := expiry.Sub(now); remaining < 7*24*time.Hour-time.Minute || remaining > 7*24*time.Hour+time.Minute {
+			t.Fatalf("session lifetime = %v, want approximately seven days", remaining)
+		}
+		return expiry
+	}
+	assertSevenDays()
+	if identity, ok, err := store.ResolveSession(ctx, token); err != nil || !ok || identity != verifiedID {
+		t.Fatalf("resolve = %q, %t, %v", identity, ok, err)
+	}
+	assertSevenDays()
+
+	// Exercise the real middleware with the real store, including context identity.
+	secret := []byte("integration-test-secret")
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(token))
+	cookie := &http.Cookie{Name: "session", Value: token + "." + hex.EncodeToString(mac.Sum(nil))}
+	auth := &middleware.Authenticator{Resolver: store, Secret: secret}
+	resolveRequest := func(wantIdentity bool) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		requestContext := &middleware.CustomContext{Context: ctx, StartTime: time.Now()}
+		if err := auth.LoadSteamId(requestContext, w, r); err != nil {
+			t.Fatal(err)
+		}
+		if wantIdentity {
+			if requestContext.Value(middleware.SteamID{}) != verifiedID {
+				t.Fatal("verified database identity did not reach request context")
+			}
+			cookies := w.Result().Cookies()
+			if len(cookies) != 1 || cookies[0].Value != cookie.Value || cookies[0].MaxAge != 7*24*3600 || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode {
+				t.Fatal("authenticated request did not refresh the secure browser cookie")
+			}
+		} else if requestContext.Value(middleware.SteamID{}) != nil || len(w.Result().Cookies()) != 0 {
+			t.Fatal("invalid session reached context or refreshed its cookie")
+		}
+	}
+	var oldExpiry time.Time
+	if err := pool.QueryRow(ctx, `UPDATE sessions SET expires_at = now() + interval '1 hour' WHERE token = $1 RETURNING expires_at`, token).Scan(&oldExpiry); err != nil {
+		t.Fatal(err)
+	}
+	resolveRequest(true)
+	if refreshed := assertSevenDays(); !refreshed.After(oldExpiry) {
+		t.Fatal("near-expiry session did not slide forward")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET expires_at = now() - interval '1 second' WHERE token = $1`, token); err != nil {
+		t.Fatal(err)
+	}
+	if identity, ok, err := store.ResolveSession(ctx, token); err != nil || ok || identity != "" {
+		t.Fatalf("expired session resolved: %q, %t, %v", identity, ok, err)
+	}
+	resolveRequest(false)
+	var stillExpired bool
+	if err := pool.QueryRow(ctx, `SELECT expires_at <= now() FROM sessions WHERE token = $1`, token).Scan(&stillExpired); err != nil || !stillExpired {
+		t.Fatal("expired session was revived")
+	}
+	if err := store.DeleteSession(ctx, secondToken); err != nil {
+		t.Fatal(err)
+	}
+	if identity, ok, err := store.ResolveSession(ctx, secondToken); err != nil || ok || identity != "" {
+		t.Fatalf("deleted session resolved: %q, %t, %v", identity, ok, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE token = $1`, secondToken).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("deleted session count = %d, error %v", count, err)
+	}
+	if err := store.DeleteSession(ctx, secondToken); err != nil {
+		t.Fatalf("repeated delete must be idempotent: %v", err)
+	}
 	cancelled, stop := context.WithCancel(ctx)
 	stop()
 	if failedID, err := store.UpsertUser(cancelled, verifiedID, profile); err == nil || failedID != 0 {
 		t.Fatal("cancelled upsert did not return an error and zero id")
+	}
+	if identity, ok, err := store.ResolveSession(cancelled, token); err == nil || ok || identity != "" {
+		t.Fatal("cancelled resolution did not return an error without identity")
+	}
+	if err := store.DeleteSession(cancelled, token); err == nil {
+		t.Fatal("cancelled deletion did not return an error")
 	}
 }
 

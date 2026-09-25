@@ -20,7 +20,7 @@ func Navbar(player steamapi.Player, username string) templ.Component {
 			return err
 		}
 		if player.PersonaName != "" {
-			_, err = fmt.Fprintf(w, `<li><details><summary><img src="%s"> %s</summary><ul class="p-2 bg-base-100 rounded-t-none"><li><a>profile</a></li><li><a>log out</a></li></ul></details></li>`, html.EscapeString(player.AvatarSmall), html.EscapeString(player.PersonaName))
+			_, err = fmt.Fprintf(w, `<li><details><summary><img src="%s"> %s</summary><ul class="p-2 bg-base-100 rounded-t-none"><li><a>profile</a></li><li><form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form></li></ul></details></li>`, html.EscapeString(player.AvatarSmall), html.EscapeString(player.PersonaName))
 		} else {
 			_, err = io.WriteString(w, `<li><a href="/auth/steam">Login</a></li>`)
 		}

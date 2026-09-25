@@ -43,8 +43,10 @@ Secure, SameSite=Lax cookie. Set `SESSION_SECRET` to a high-entropy secret and
 request Host and proxy headers are not used to construct that origin. Deployed
 sign-in requires HTTPS, including when TLS terminates at a reverse proxy.
 The old Steam-ID entry form and GET/POST `/login` handlers have been removed.
-This step establishes the cookie only; it does not yet provide authenticated
-request handling.
+Authenticated requests verify the cookie signature, resolve the verified SteamID64,
+and refresh both the database expiry and browser cookie to seven days from now.
+Expired or invalid sessions fall through to Steam sign-in. The signed-in navigation
+submits a POST to `/auth/steam/logout`, which deletes the session and clears its cookie.
 
 ## Verification
 
@@ -63,6 +65,6 @@ TLS-requiring database can be used to check the provider's TLS settings too.
 
 ```sh
 TEST_DATABASE_URL='postgres://user:pass@host:5432/test_db?sslmode=require' \
-  go test -tags=integration ./internal/db -count=1 -v
+  go test -tags=integration ./... -count=1 -v
 ```
 

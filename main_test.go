@@ -107,6 +107,8 @@ type fakeSessionStore struct {
 	userID     int64
 	upsertErr  error
 	sessionErr error
+	deleteErr  error
+	deleted    string
 }
 
 func (s *fakeSessionStore) UpsertUser(ctx context.Context, id string, player steamapi.Player) (int64, error) {
@@ -119,6 +121,17 @@ func (s *fakeSessionStore) CreateSession(ctx context.Context, userID int64) (str
 	s.calls = append(s.calls, "session")
 	s.userID = userID
 	return testSessionToken, s.sessionErr
+}
+
+func (s *fakeSessionStore) ResolveSession(ctx context.Context, token string) (string, bool, error) {
+	s.calls = append(s.calls, "resolve")
+	return "", false, nil
+}
+
+func (s *fakeSessionStore) DeleteSession(ctx context.Context, token string) error {
+	s.calls = append(s.calls, "delete")
+	s.deleted = token
+	return s.deleteErr
 }
 
 func TestCallbackRejectsInvalidAssertion(t *testing.T) {
@@ -244,10 +257,67 @@ func TestCallbackPersistsVerifiedIdentityAndSignsSession(t *testing.T) {
 			cookie := cookies[0]
 			// Independent HMAC-SHA256 vector for test-secret and testSessionToken.
 			wantValue := testSessionToken + ".bb8b1ab13589803b5109e1ff07b6955253c9b0d13e89e2b3de4d88879ba517bc"
-			if cookie.Name != "session" || cookie.Value != wantValue || cookie.Path != "/" || !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode {
+			if cookie.Name != "session" || cookie.Value != wantValue || cookie.Path != "/" || !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 7*24*3600 {
 				t.Fatalf("unexpected session cookie: %+v", cookie)
 			}
 		})
+	}
+}
+
+func TestHandleLogout(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		value     string
+		deleteErr error
+		wantToken string
+	}{
+		{name: "current session", value: testSessionToken + ".signature", wantToken: testSessionToken},
+		{name: "delete error", value: testSessionToken + ".signature", deleteErr: errors.New("unavailable"), wantToken: testSessionToken},
+		{name: "no cookie"},
+		{name: "malformed cookie", value: testSessionToken},
+		{name: "empty token", value: ".signature"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeSessionStore{deleteErr: tc.deleteErr}
+			app := application{store: store}
+			r := httptest.NewRequest(http.MethodPost, "/auth/steam/logout", nil)
+			if tc.value != "" {
+				r.AddCookie(&http.Cookie{Name: "session", Value: tc.value})
+			}
+			w := httptest.NewRecorder()
+			app.handleLogout(w, r)
+			if store.deleted != tc.wantToken {
+				t.Fatal("logout did not delete the presented token")
+			}
+			wantCalls := 0
+			if tc.wantToken != "" {
+				wantCalls = 1
+			}
+			if len(store.calls) != wantCalls {
+				t.Fatalf("store calls = %d, want %d", len(store.calls), wantCalls)
+			}
+			if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+				t.Fatal("logout must redirect to the signed-out home")
+			}
+			cookies := w.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatal("logout must clear one cookie")
+			}
+			cookie := cookies[0]
+			if cookie.Name != "session" || cookie.Value != "" || cookie.Path != "/" || cookie.MaxAge != -1 || !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode {
+				t.Fatal("logout must securely clear the session cookie")
+			}
+		})
+	}
+}
+
+func TestSignedInHomeOffersPostLogout(t *testing.T) {
+	var html strings.Builder
+	if err := template.Home(steamapi.Player{PersonaName: "Alyx"}, "Gather Your Party", template.Main).Render(context.Background(), &html); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(html.String(), `<form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form>`) {
+		t.Fatal("signed-in home must offer the POST logout action")
 	}
 }
 
