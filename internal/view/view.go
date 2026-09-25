@@ -38,7 +38,9 @@ func Home(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request)
 	fmt.Println("Created the service!")
 	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
-		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
+		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 
@@ -48,21 +50,29 @@ func Home(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request)
 	defer cancelCtx()
 	players, err := SteamService.Players(newCtx, playerIdList)
 	if err != nil {
-		template.ErrorMessage(err.Error()).Render(ctx, w)
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 	if len(players) == 0 {
-		template.ErrorMessage("no player found").Render(ctx, w)
+		if err := template.ErrorMessage("no player found").Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
-	template.Home(players[0], "Gather Your Party", template.Main).Render(ctx, w)
+	if err := template.Home(players[0], "Gather Your Party", template.Main).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
 }
 
 func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
 	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
-		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
+		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 	playerId := steamIDValue.(string)
@@ -71,17 +81,23 @@ func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Req
 	defer cancelCtx()
 	games, err := SteamService.Games(newCtx, playerId)
 	if err != nil {
-		template.ErrorMessage(err.Error()).Render(ctx, w)
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
-	template.GameList(games).Render(ctx, w)
+	if err := template.GameList(games).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
 }
 
 func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
 	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
-		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
+		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 
@@ -92,18 +108,24 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 	defer cancelCtx()
 	friends, err := SteamService.Friends(newCtx, playerId)
 	if err != nil {
-		template.ErrorMessage(err.Error()).Render(ctx, w)
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 
-	template.FriendsList(friends).Render(ctx, w)
+	if err := template.FriendsList(friends).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
 }
 
 func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
 	steamIDValue := ctx.Context.Value(middleware.SteamID{})
 	if steamIDValue == nil {
-		template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w)
+		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 	playerId := steamIDValue.(string)
@@ -114,12 +136,16 @@ func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *ht
 
 	friends, err := SteamService.Friends(newCtx, playerId)
 	if err != nil {
-		template.ErrorMessage(err.Error()).Render(ctx, w)
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		template.ErrorMessage(err.Error()).Render(ctx, w)
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 	friendIDs := r.Form["friendID"]
@@ -127,14 +153,20 @@ func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *ht
 	games, err := SteamService.SharedGames(newCtx, playerId, friendIDs...)
 	if err != nil {
 		if messages, ok := sharedGamesNoGamesMessages(err, friends); ok {
-			template.ErrorMessages(messages).Render(ctx, w)
+			if err := template.ErrorMessages(messages).Render(ctx, w); err != nil {
+				fmt.Printf("render error: %s\n", err)
+			}
 			return
 		}
-		template.ErrorMessage(err.Error()).Render(ctx, w)
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
 		return
 	}
 
-	template.SharedGamesList(games).Render(ctx, w)
+	if err := template.SharedGamesList(games).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
 }
 
 func sharedGamesNoGamesMessages(err error, roster []steamapi.Player) ([]string, bool) {
