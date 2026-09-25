@@ -42,6 +42,21 @@ func (s *Store) UpsertUser(ctx context.Context, verifiedSteamID64 string, player
 	return id, nil
 }
 
+// ResolveUserID turns a verified SteamID64 into its users.id. Because
+// steam_id_64 is UNIQUE, a known SteamID64 yields exactly one id; an unknown
+// one returns pgx.ErrNoRows-derived not-found (mirroring ResolveSession).
+func (s *Store) ResolveUserID(ctx context.Context, steamID64 string) (int64, bool, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE steam_id_64 = $1`, steamID64).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve user id: %w", err)
+	}
+	return id, true, nil
+}
+
 // CreateSession creates a seven-day session with a 256-bit random opaque token.
 // A token is returned only after its database row has been stored successfully.
 func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error) {
