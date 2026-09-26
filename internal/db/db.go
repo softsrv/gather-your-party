@@ -1,4 +1,4 @@
-// Package db provides the persistence write paths for users and sessions.
+// Package db provides persistence for users, sessions, and parties.
 package db
 
 import (
@@ -94,6 +94,36 @@ func (s *Store) ResolveSession(ctx context.Context, token string) (string, bool,
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	if _, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token); err != nil {
 		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+// CreateParty atomically makes the creator the leader and sole member of a new party.
+func (s *Store) CreateParty(ctx context.Context, leaderUserID int64, name string) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin create party: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var partyID string
+	if err := tx.QueryRow(ctx, `INSERT INTO parties (leader_id, name) VALUES ($1, $2) RETURNING id`, leaderUserID, name).Scan(&partyID); err != nil {
+		return "", fmt.Errorf("create party: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, partyID, leaderUserID); err != nil {
+		return "", fmt.Errorf("create leader membership: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit create party: %w", err)
+	}
+	return partyID, nil
+}
+
+// LeaveParty removes only the acting user's membership, regardless of their role.
+// Leadership succession and empty-party cleanup are handled separately.
+func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int64) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM memberships WHERE party_id = $1 AND user_id = $2`, partyID, actingUserID); err != nil {
+		return fmt.Errorf("leave party: %w", err)
 	}
 	return nil
 }

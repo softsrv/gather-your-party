@@ -15,8 +15,10 @@ import (
 
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
+	"gather-your-party/internal/template"
 	"gather-your-party/internal/view"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/softsrv/steamapi/steamapi"
@@ -35,6 +37,9 @@ type sessionStore interface {
 	CreateSession(context.Context, int64) (string, error)
 	ResolveSession(context.Context, string) (string, bool, error)
 	DeleteSession(context.Context, string) error
+	ResolveUserID(context.Context, string) (int64, bool, error)
+	CreateParty(context.Context, int64, string) (string, error)
+	LeaveParty(context.Context, string, int64) error
 }
 
 type application struct {
@@ -187,6 +192,63 @@ func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// leaveIdentity accepts identity only from the verified session middleware.
+func (app *application) leaveIdentity(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (string, int64, bool) {
+	steamID, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	if !ok || steamID == "" {
+		http.Error(w, "sign in to leave a party", http.StatusUnauthorized)
+		return "", 0, false
+	}
+	partyID := r.PathValue("partyID")
+	var id pgtype.UUID
+	if err := id.Scan(partyID); err != nil || !id.Valid {
+		http.Error(w, "invalid party ID", http.StatusBadRequest)
+		return "", 0, false
+	}
+	userID, found, err := app.store.ResolveUserID(r.Context(), steamID)
+	if err != nil {
+		http.Error(w, "unable to resolve user", http.StatusInternalServerError)
+		return "", 0, false
+	}
+	if !found {
+		http.Error(w, "sign in to leave a party", http.StatusUnauthorized)
+		return "", 0, false
+	}
+	return partyID, userID, true
+}
+
+func (app *application) handleLeaveConfirmation(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, _, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := template.LeaveParty(partyID).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
+func (app *application) handleLeaveParty(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, userID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil || r.PostForm.Get("confirm") != "yes" {
+		http.Error(w, "confirm before leaving the party", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.LeaveParty(r.Context(), partyID, userID); err != nil {
+		http.Error(w, "unable to leave party", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// An empty successful response dismisses the confirmation via outerHTML.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func assertionIsValid(body string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if strings.TrimSuffix(line, "\r") == "is_valid:true" {
@@ -208,7 +270,7 @@ func steamID64FromClaimedID(claimedID string) (string, error) {
 	return id, nil
 }
 
-func (app *application) serve() {
+func (app *application) routes() http.Handler {
 	auth := &middleware.Authenticator{Resolver: app.store, Secret: []byte(app.config.SessionSecret)}
 	mux := http.NewServeMux()
 
@@ -230,8 +292,18 @@ func (app *application) serve() {
 		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
 	})
 
+	mux.HandleFunc("GET /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleLeaveConfirmation, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleLeaveParty, auth.LoadSteamId)
+	})
+	return mux
+}
+
+func (app *application) serve() {
 	fmt.Printf("server is running on port %s\n", os.Getenv("LISTEN_ADDR"))
-	err := http.ListenAndServe(":"+os.Getenv("LISTEN_ADDR"), mux)
+	err := http.ListenAndServe(":"+os.Getenv("LISTEN_ADDR"), app.routes())
 	if err != nil {
 		fmt.Println(err)
 	}

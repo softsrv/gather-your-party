@@ -134,6 +134,18 @@ func (s *fakeSessionStore) DeleteSession(ctx context.Context, token string) erro
 	return s.deleteErr
 }
 
+func (s *fakeSessionStore) ResolveUserID(context.Context, string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+func (s *fakeSessionStore) CreateParty(context.Context, int64, string) (string, error) {
+	return "", errors.New("unexpected CreateParty call")
+}
+
+func (s *fakeSessionStore) LeaveParty(context.Context, string, int64) error {
+	return errors.New("unexpected LeaveParty call")
+}
+
 func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 	received := make(chan url.Values, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +156,9 @@ func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 			t.Error(err)
 		}
 		received <- r.PostForm
-		io.WriteString(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n")
+		if _, err := io.WriteString(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n"); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 	oldEndpoint := steamOpenIDEndpoint
