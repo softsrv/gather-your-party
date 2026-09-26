@@ -119,11 +119,78 @@ func (s *Store) CreateParty(ctx context.Context, leaderUserID int64, name string
 	return partyID, nil
 }
 
-// LeaveParty removes only the acting user's membership, regardless of their role.
-// Leadership succession and empty-party cleanup are handled separately.
+// StepDown hands leadership to a current member without removing the former leader.
+func (s *Store) StepDown(ctx context.Context, partyID string, actingUserID int64, targetUserID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin step down: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize leadership changes with LeaveParty before checking membership.
+	var leaderID int64
+	if err := tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&leaderID); err != nil {
+		return fmt.Errorf("get step down leader: %w", err)
+	}
+	if leaderID != actingUserID {
+		return errors.New("step down: only the current leader can transfer leadership")
+	}
+	var memberCount int64
+	var targetIsMember bool
+	if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE user_id = $2) > 0 FROM memberships WHERE party_id = $1`, partyID, targetUserID).Scan(&memberCount, &targetIsMember); err != nil {
+		return fmt.Errorf("get step down members: %w", err)
+	}
+	if memberCount <= 1 {
+		return errors.New("step down: another member is required")
+	}
+	if !targetIsMember {
+		return errors.New("step down: target must be a current party member")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE parties SET leader_id = $2 WHERE id = $1`, partyID, targetUserID); err != nil {
+		return fmt.Errorf("step down: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit step down: %w", err)
+	}
+	return nil
+}
+
+// LeaveParty removes only the acting user's membership and, if they led the
+// party, transfers leadership to the earliest-joined remaining member.
+// Empty-party cleanup is handled separately.
 func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int64) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM memberships WHERE party_id = $1 AND user_id = $2`, partyID, actingUserID); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin leave party: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var leaderID int64
+	err = tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&leaderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get leave party leader: %w", err)
+	}
+	removed, err := tx.Exec(ctx, `DELETE FROM memberships WHERE party_id = $1 AND user_id = $2`, partyID, actingUserID)
+	if err != nil {
 		return fmt.Errorf("leave party: %w", err)
+	}
+	if leaderID == actingUserID && removed.RowsAffected() > 0 {
+		var successorID int64
+		err := tx.QueryRow(ctx, `SELECT user_id FROM memberships WHERE party_id = $1 ORDER BY joined_at, user_id LIMIT 1`, partyID).Scan(&successorID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("get leave party successor: %w", err)
+		}
+		if err == nil {
+			if _, err := tx.Exec(ctx, `UPDATE parties SET leader_id = $2 WHERE id = $1`, partyID, successorID); err != nil {
+				return fmt.Errorf("set leave party successor: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit leave party: %w", err)
 	}
 	return nil
 }

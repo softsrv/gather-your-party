@@ -158,6 +158,13 @@ func TestLeavePartyOnlyActingMembershipIncludingLeader(t *testing.T) {
 	assertMembership(party, leader, false)
 	assertMembership(party, member, true)
 	assertMembership(other, leader, true)
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != member {
+		t.Fatalf("successor=%d want=%d err=%v", gotLeader, member, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, other).Scan(&gotLeader); err != nil || gotLeader != leader {
+		t.Fatalf("other party leadership changed: %d, %v", gotLeader, err)
+	}
 	if err := store.LeaveParty(ctx, party, member); err != nil {
 		t.Fatal(err)
 	}
@@ -165,12 +172,197 @@ func TestLeavePartyOnlyActingMembershipIncludingLeader(t *testing.T) {
 	if err := store.LeaveParty(ctx, party, member); err != nil {
 		t.Fatal(err)
 	}
-	// This slice deliberately does not change leadership or remove empty parties.
-	var gotLeader int64
-	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leader {
-		t.Fatalf("party or leadership changed: %d, %v", gotLeader, err)
+	// Empty-party cleanup is a separate operation; leaving must keep the party.
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM parties WHERE id = $1)`, party).Scan(&exists); err != nil || !exists {
+		t.Fatalf("empty party exists=%t err=%v", exists, err)
 	}
 	if err := store.LeaveParty(ctx, "invalid-uuid", leader); err == nil {
 		t.Fatal("invalid UUID must return an error")
+	}
+}
+
+// CLM-1: handing off leadership preserves the former leader's membership.
+func TestStepDownKeepsFormerLeaderMembership(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000001")
+	member := partyTestUser(t, store, ctx, "76561198000000002")
+	party, err := store.CreateParty(ctx, leader, "Handoff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StepDown(ctx, party, leader, member); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != member {
+		t.Fatalf("leader=%d want=%d err=%v", gotLeader, member, err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, leader).Scan(&exists); err != nil || !exists {
+		t.Fatalf("former leader membership exists=%t err=%v", exists, err)
+	}
+}
+
+// CLM-2: a chosen member need not be the earliest-joined non-leader.
+func TestStepDownAcceptsNonSeniorMember(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000001")
+	senior := partyTestUser(t, store, ctx, "76561198000000002")
+	chosen := partyTestUser(t, store, ctx, "76561198000000003")
+	party, err := store.CreateParty(ctx, leader, "Choose any member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET joined_at = '2025-01-01T00:00:00Z' WHERE party_id = $1`, party); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1, $2, '2025-01-02T00:00:00Z'), ($1, $3, '2025-01-03T00:00:00Z')`, party, senior, chosen); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StepDown(ctx, party, leader, chosen); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != chosen {
+		t.Fatalf("leader=%d want non-senior=%d err=%v", gotLeader, chosen, err)
+	}
+}
+
+func TestStepDownRejectsInvalidHandoff(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		soleMember bool
+		actor      string
+		target     string
+	}{
+		// Each guard is isolated: the other preconditions permit the handoff.
+		{name: "CLM-3 non-leader actor", actor: "member", target: "member"},
+		{name: "CLM-4 sole member targets self", soleMember: true, actor: "leader", target: "leader"},
+		{name: "CLM-9 non-member target", actor: "leader", target: "outsider"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, pool, ctx := partyTestStore(t)
+			leader := partyTestUser(t, store, ctx, "76561198000000001")
+			member := partyTestUser(t, store, ctx, "76561198000000002")
+			outsider := partyTestUser(t, store, ctx, "76561198000000003")
+			party, err := store.CreateParty(ctx, leader, "Rejected handoff")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.soleMember {
+				if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Membership in a different party must not make the outsider eligible.
+			if _, err := store.CreateParty(ctx, outsider, "Other party"); err != nil {
+				t.Fatal(err)
+			}
+			users := map[string]int64{"leader": leader, "member": member, "outsider": outsider}
+			if err := store.StepDown(ctx, party, users[test.actor], users[test.target]); err == nil {
+				t.Fatal("invalid handoff must return an error")
+			}
+			var gotLeader int64
+			if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leader {
+				t.Fatalf("rejected handoff changed leader: got=%d want=%d err=%v", gotLeader, leader, err)
+			}
+		})
+	}
+}
+
+// CLM-5 and CLM-6: succession selects the earliest-joined remaining member.
+func TestLeavePartyLeaderSucceedsToEarliestRemainingMember(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000001")
+	later := partyTestUser(t, store, ctx, "76561198000000002")
+	senior := partyTestUser(t, store, ctx, "76561198000000003")
+	party, err := store.CreateParty(ctx, leader, "Automatic succession")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET joined_at = '2025-01-01T00:00:00Z' WHERE party_id = $1`, party); err != nil {
+		t.Fatal(err)
+	}
+	// Insert the later member first, with the smaller user ID, so neither
+	// insertion order nor user ID order substitutes for joined_at ordering.
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1, $2, '2025-01-03T00:00:00Z'), ($1, $3, '2025-01-02T00:00:00Z')`, party, later, senior); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, leader); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != senior {
+		t.Fatalf("successor=%d want earliest remaining=%d err=%v", gotLeader, senior, err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, gotLeader).Scan(&exists); err != nil || !exists {
+		t.Fatalf("successor membership exists=%t err=%v", exists, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, leader).Scan(&exists); err != nil || exists {
+		t.Fatalf("departed leader membership exists=%t err=%v", exists, err)
+	}
+}
+
+// CLM-7: a non-leader leaving must not trigger succession.
+func TestLeavePartyNonLeaderKeepsLeadership(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000001")
+	leaver := partyTestUser(t, store, ctx, "76561198000000002")
+	senior := partyTestUser(t, store, ctx, "76561198000000003")
+	party, err := store.CreateParty(ctx, leader, "No succession")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A leader can be newer than other members after an explicit handoff.
+	// Make another remaining member older so unconditional succession fails.
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET joined_at = '2025-01-03T00:00:00Z' WHERE party_id = $1`, party); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1, $2, '2025-01-02T00:00:00Z'), ($1, $3, '2025-01-01T00:00:00Z')`, party, leaver, senior); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, leaver); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leader {
+		t.Fatalf("non-leader departure changed leader: got=%d want=%d err=%v", gotLeader, leader, err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, leaver).Scan(&exists); err != nil || exists {
+		t.Fatalf("departed member membership exists=%t err=%v", exists, err)
+	}
+}
+
+func TestLeavePartyRollsBackSuccessionFailure(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000001")
+	member := partyTestUser(t, store, ctx, "76561198000000002")
+	party, err := store.CreateParty(ctx, leader, "Atomic succession")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
+	// Force the leadership update to fail AFTER membership removal.
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE parties ADD CONSTRAINT reject_test_successor CHECK (leader_id <> %d)`, member)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, leader); err == nil {
+		t.Fatal("failed succession must return an error")
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leader {
+		t.Fatalf("failed succession changed leader: %d, %v", gotLeader, err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, leader).Scan(&exists); err != nil || !exists {
+		t.Fatalf("failed succession removed leader membership: exists=%t err=%v", exists, err)
 	}
 }
