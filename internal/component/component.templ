@@ -39,6 +39,12 @@ templ LeaveConfirmation(partyID string) {
 	</section>
 }
 
+templ StepDownControl(partyID string, memberCount int) {
+	<section id="step-down-control" aria-label="Step down" data-party-id={ partyID }>
+		<button type="button" class="btn btn-primary" disabled?={ memberCount <= 1 }>Hand off leadership</button>
+	</section>
+}
+
 templ Banner() {
 	<header class="p-6 flex flex-col justify-between">
 		<img src="/static/svg/logo.svg" class="h-20 w-20"/>

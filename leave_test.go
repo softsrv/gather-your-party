@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"gather-your-party/internal/component"
 )
 
 const testPartyID = "61daf402-9c06-4c3b-923f-5f7dfd4369c7"
@@ -95,6 +97,52 @@ func TestLeaveRoutes(t *testing.T) {
 	router.ServeHTTP(w, leaveRequest(http.MethodPost, path, "confirm=yes", true))
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
 		t.Fatal("non-HTMX confirmation must redirect home")
+	}
+}
+
+// Exercises the real templ component without requiring page or route wiring.
+func TestStepDownControlRendersHandoffAndDisabledStates(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		memberCount int
+		disabled    bool
+	}{
+		{name: "two members", memberCount: 2},
+		{name: "several members", memberCount: 5},
+		{name: "sole member", memberCount: 1, disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			if err := component.StepDownControl(testPartyID, tc.memberCount).Render(context.Background(), w); err != nil {
+				t.Fatal(err)
+			}
+			body := w.Body.String()
+			for _, want := range []string{
+				`<section id="step-down-control" aria-label="Step down"`,
+				`data-party-id="` + testPartyID + `"`,
+				`<button type="button" class="btn btn-primary"`,
+				`>Hand off leadership</button>`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("step-down control missing %q: %s", want, body)
+				}
+			}
+			if strings.Count(body, "<button ") != 1 {
+				t.Fatalf("expected exactly one handoff control: %s", body)
+			}
+			_, button, _ := strings.Cut(body, "<button ")
+			button, _, _ = strings.Cut(button, ">")
+			if got := strings.Contains(button, " disabled"); got != tc.disabled {
+				t.Errorf("handoff disabled=%t, want=%t: %s", got, tc.disabled, body)
+			}
+			if tc.disabled {
+				for _, forbidden := range []string{"<form", "<a ", "hx-post=", "hx-get=", "onclick="} {
+					if strings.Contains(body, forbidden) {
+						t.Errorf("sole-member control contains actionable %q: %s", forbidden, body)
+					}
+				}
+			}
+		})
 	}
 }
 
