@@ -10,13 +10,17 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
+	"gather-your-party/internal/template"
 	"gather-your-party/internal/view"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/softsrv/steamapi/steamapi"
@@ -35,6 +39,18 @@ type sessionStore interface {
 	CreateSession(context.Context, int64) (string, error)
 	ResolveSession(context.Context, string) (string, bool, error)
 	DeleteSession(context.Context, string) error
+	ResolveUserID(context.Context, string) (int64, bool, error)
+	CreateParty(context.Context, int64, string) (string, error)
+	UserParties(context.Context, int64) ([]db.UserParty, error)
+	UserPendingInvites(context.Context, int64) ([]db.UserPendingInvite, error)
+	PartyMembers(context.Context, string) ([]db.PartyMember, error)
+	IsMember(context.Context, string, int64) (bool, error)
+	LeaveParty(context.Context, string, int64) error
+	StepDown(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error
+	SendInvite(context.Context, string, int64, int64) error
+	AcceptInvite(context.Context, string, int64) error
+	RejectInvite(context.Context, string, int64) error
+	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
 }
 
 type application struct {
@@ -187,6 +203,278 @@ func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// sessionUserID accepts identity only from the verified session middleware.
+func (app *application) sessionUserID(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (int64, bool) {
+	steamID, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	if !ok || steamID == "" {
+		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
+		return 0, false
+	}
+	userID, found, err := app.store.ResolveUserID(r.Context(), steamID)
+	if err != nil {
+		http.Error(w, "unable to resolve user", http.StatusInternalServerError)
+		return 0, false
+	}
+	if !found {
+		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
+		return 0, false
+	}
+	return userID, true
+}
+
+func (app *application) handleParties(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := app.sessionUserID(ctx, w, r)
+	if !ok {
+		return
+	}
+	parties, err := app.store.UserParties(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "unable to load parties", http.StatusInternalServerError)
+		return
+	}
+	invites, err := app.store.UserPendingInvites(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "unable to load invites", http.StatusInternalServerError)
+		return
+	}
+	current := make([]component.UserParty, 0, len(parties))
+	for _, party := range parties {
+		current = append(current, component.UserParty{PartyID: party.PartyID, Name: party.Name})
+	}
+	pending := make([]component.UserPendingInvite, 0, len(invites))
+	for _, invite := range invites {
+		pending = append(pending, component.UserPendingInvite{PartyID: invite.PartyID, Name: invite.Name})
+	}
+	if err := template.PartiesPage(current, pending).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
+func (app *application) handleCreateParty(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := app.sessionUserID(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	partyID, err := app.store.CreateParty(r.Context(), userID, r.PostForm.Get("name"))
+	if err != nil {
+		http.Error(w, "unable to create party", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		// Navigate to the new party instead of swapping an empty response into the form.
+		w.Header().Set("HX-Redirect", "/parties/"+partyID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/parties/"+partyID, http.StatusSeeOther)
+}
+
+// leaveIdentity accepts identity only from the verified session middleware.
+func (app *application) leaveIdentity(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (string, int64, bool) {
+	steamID, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	if !ok || steamID == "" {
+		http.Error(w, "sign in to leave a party", http.StatusUnauthorized)
+		return "", 0, false
+	}
+	partyID := r.PathValue("partyID")
+	var id pgtype.UUID
+	if err := id.Scan(partyID); err != nil || !id.Valid {
+		http.Error(w, "invalid party ID", http.StatusBadRequest)
+		return "", 0, false
+	}
+	userID, found, err := app.store.ResolveUserID(r.Context(), steamID)
+	if err != nil {
+		http.Error(w, "unable to resolve user", http.StatusInternalServerError)
+		return "", 0, false
+	}
+	if !found {
+		http.Error(w, "sign in to leave a party", http.StatusUnauthorized)
+		return "", 0, false
+	}
+	return partyID, userID, true
+}
+
+func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, userID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	member, err := app.store.IsMember(r.Context(), partyID, userID)
+	if err != nil {
+		http.Error(w, "unable to check membership", http.StatusInternalServerError)
+		return
+	}
+	if !member {
+		http.Error(w, "party members only", http.StatusForbidden)
+		return
+	}
+	members, err := app.store.PartyMembers(r.Context(), partyID)
+	if err != nil {
+		http.Error(w, "unable to load party members", http.StatusInternalServerError)
+		return
+	}
+	roster := make([]component.PartyMember, 0, len(members))
+	isLeader := false
+	for _, member := range members {
+		roster = append(roster, component.PartyMember{Name: member.Name, AvatarURL: member.AvatarURL})
+		if member.UserID == userID && member.IsLeader {
+			isLeader = true
+		}
+	}
+	var inviteCandidates []component.InviteCandidate
+	var stepDownCandidates []component.StepDownCandidate
+	if isLeader {
+		service := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+		deadline := time.Now().Add(5000 * time.Millisecond)
+		newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
+		defer cancelCtx()
+		steamID := ctx.Context.Value(middleware.SteamID{}).(string)
+		inviteCandidates, err = view.BuildInviteCandidates(newCtx, service, app.store, partyID, userID, steamID)
+		if err != nil {
+			http.Error(w, "unable to load invite candidates", http.StatusInternalServerError)
+			return
+		}
+		for _, member := range members {
+			if member.UserID != userID {
+				stepDownCandidates = append(stepDownCandidates, component.StepDownCandidate{UserID: member.UserID, Name: member.Name})
+			}
+		}
+	}
+	if err := template.PartyDetail(partyID, roster, isLeader, inviteCandidates, stepDownCandidates).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
+func (app *application) handleLeaveConfirmation(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, _, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := template.LeaveParty(partyID).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
+func (app *application) handleLeaveParty(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, userID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil || r.PostForm.Get("confirm") != "yes" {
+		http.Error(w, "confirm before leaving the party", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.LeaveParty(r.Context(), partyID, userID); err != nil {
+		http.Error(w, "unable to leave party", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// An empty successful response dismisses the confirmation via outerHTML.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleStepDown(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	targetID, err := strconv.ParseInt(r.PostForm.Get("target"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.StepDown(r.Context(), partyID, actingUserID, targetID); err != nil {
+		http.Error(w, "unable to step down", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	targetID, err := strconv.ParseInt(r.PostForm.Get("target"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.SendInvite(r.Context(), partyID, actingUserID, targetID); err != nil {
+		http.Error(w, "unable to send invite", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleAcceptInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.AcceptInvite(r.Context(), partyID, actingUserID); err != nil {
+		http.Error(w, "unable to accept invite", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleRejectInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.RejectInvite(r.Context(), partyID, actingUserID); err != nil {
+		http.Error(w, "unable to reject invite", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func assertionIsValid(body string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if strings.TrimSuffix(line, "\r") == "is_valid:true" {
@@ -208,7 +496,7 @@ func steamID64FromClaimedID(claimedID string) (string, error) {
 	return id, nil
 }
 
-func (app *application) serve() {
+func (app *application) routes() http.Handler {
 	auth := &middleware.Authenticator{Resolver: app.store, Secret: []byte(app.config.SessionSecret)}
 	mux := http.NewServeMux()
 
@@ -230,8 +518,39 @@ func (app *application) serve() {
 		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
 	})
 
+	mux.HandleFunc("GET /parties", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleParties, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleCreateParty, auth.LoadSteamId)
+	})
+	mux.HandleFunc("GET /parties/{partyID}", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handlePartyDetail, auth.LoadSteamId)
+	})
+	mux.HandleFunc("GET /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleLeaveConfirmation, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleLeaveParty, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/step-down", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleStepDown, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/invites/send", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleSendInvite, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/invites/accept", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleAcceptInvite, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/invites/reject", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleRejectInvite, auth.LoadSteamId)
+	})
+	return mux
+}
+
+func (app *application) serve() {
 	fmt.Printf("server is running on port %s\n", os.Getenv("LISTEN_ADDR"))
-	err := http.ListenAndServe(":"+os.Getenv("LISTEN_ADDR"), mux)
+	err := http.ListenAndServe(":"+os.Getenv("LISTEN_ADDR"), app.routes())
 	if err != nil {
 		fmt.Println(err)
 	}

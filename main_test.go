@@ -12,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"gather-your-party/internal/db"
 	"gather-your-party/internal/template"
 
 	"github.com/softsrv/steamapi/steamapi"
 )
+
+var _ sessionStore = (*db.Store)(nil)
 
 const testSteamID = "76561197960287930"
 const testSessionToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -134,6 +137,54 @@ func (s *fakeSessionStore) DeleteSession(ctx context.Context, token string) erro
 	return s.deleteErr
 }
 
+func (s *fakeSessionStore) ResolveUserID(context.Context, string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+func (s *fakeSessionStore) CreateParty(context.Context, int64, string) (string, error) {
+	return "", errors.New("unexpected CreateParty call")
+}
+
+func (s *fakeSessionStore) UserParties(context.Context, int64) ([]db.UserParty, error) {
+	return nil, errors.New("unexpected UserParties call")
+}
+
+func (s *fakeSessionStore) UserPendingInvites(context.Context, int64) ([]db.UserPendingInvite, error) {
+	return nil, errors.New("unexpected UserPendingInvites call")
+}
+
+func (s *fakeSessionStore) PartyMembers(context.Context, string) ([]db.PartyMember, error) {
+	return nil, errors.New("unexpected PartyMembers call")
+}
+
+func (s *fakeSessionStore) IsMember(context.Context, string, int64) (bool, error) {
+	return false, errors.New("unexpected IsMember call")
+}
+
+func (s *fakeSessionStore) LeaveParty(context.Context, string, int64) error {
+	return errors.New("unexpected LeaveParty call")
+}
+
+func (s *fakeSessionStore) StepDown(context.Context, string, int64, int64) error {
+	return errors.New("unexpected StepDown call")
+}
+
+func (s *fakeSessionStore) SendInvite(context.Context, string, int64, int64) error {
+	return errors.New("unexpected SendInvite call")
+}
+
+func (s *fakeSessionStore) AcceptInvite(context.Context, string, int64) error {
+	return errors.New("unexpected AcceptInvite call")
+}
+
+func (s *fakeSessionStore) RejectInvite(context.Context, string, int64) error {
+	return errors.New("unexpected RejectInvite call")
+}
+
+func (s *fakeSessionStore) InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error) {
+	return nil, errors.New("unexpected InviteCandidates call")
+}
+
 func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 	received := make(chan url.Values, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +195,9 @@ func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 			t.Error(err)
 		}
 		received <- r.PostForm
-		io.WriteString(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n")
+		if _, err := io.WriteString(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n"); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 	oldEndpoint := steamOpenIDEndpoint

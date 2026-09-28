@@ -46,6 +46,30 @@ templ Home(player steamapi.Player, title string, pageName PageState) {
 	}
 }
 
+templ PartiesPage(parties []component.UserParty, invites []component.UserPendingInvite) {
+	@Base("Parties") {
+		<h1 class="text-lg font-bold">Parties</h1>
+		@component.PartiesTabs(parties, invites)
+		@component.CreatePartyForm()
+	}
+}
+
+templ PartyDetail(partyID string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate) {
+	@Base("Party details") {
+		@component.PartyRoster(members)
+		if isLeader {
+			@component.InvitePicker(partyID, inviteCandidates)
+			@component.StepDownControl(partyID, stepDownCandidates)
+		}
+	}
+}
+
+templ LeaveParty(partyID string) {
+	@Base("Leave party") {
+		@component.LeaveConfirmation(partyID)
+	}
+}
+
 templ ErrorMessage(msg string) {
 	@component.ErrorMessage(msg)
 }

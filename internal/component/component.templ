@@ -1,6 +1,10 @@
 package component
 
-import "github.com/softsrv/steamapi/steamapi"
+import (
+	"strconv"
+
+	"github.com/softsrv/steamapi/steamapi"
+)
 
 templ Navbar(player steamapi.Player, username string) {
 	<div class="navbar bg-base-100">
@@ -27,6 +31,129 @@ templ Navbar(player steamapi.Player, username string) {
 			</ul>
 		</div>
 	</div>
+}
+
+type UserParty struct {
+	PartyID string
+	Name    string
+}
+
+type UserPendingInvite struct {
+	PartyID string
+	Name    string
+}
+
+templ PartiesTabs(parties []UserParty, invites []UserPendingInvite) {
+	<div role="tablist" class="tabs tabs-lifted">
+		<input type="radio" name="parties-tabs" id="current-parties-tab" role="tab" class="tab" aria-label="Current parties" aria-controls="current-parties-panel" checked/>
+		<section id="current-parties-panel" role="tabpanel" aria-labelledby="current-parties-tab" class="tab-content bg-base-100 p-6">
+			<ul>
+				for _, party := range parties {
+					<li><a href={ templ.SafeURL("/parties/" + party.PartyID) }>{ party.Name }</a></li>
+				}
+			</ul>
+		</section>
+		<input type="radio" name="parties-tabs" id="invites-tab" role="tab" class="tab" aria-label="Invites" aria-controls="invites-panel"/>
+		<section id="invites-panel" role="tabpanel" aria-labelledby="invites-tab" class="tab-content bg-base-100 p-6">
+			<ul>
+				for _, invite := range invites {
+					<li>
+						<span>{ invite.Name }</span>
+						@AcceptInviteControl(invite.PartyID)
+						@RejectInviteControl(invite.PartyID)
+					</li>
+				}
+			</ul>
+		</section>
+	</div>
+}
+
+templ CreatePartyForm() {
+	<form method="post" action="/parties" hx-post="/parties">
+		<label for="party-name">Party name</label>
+		<input type="text" id="party-name" name="name" class="input input-bordered" required/>
+		<button type="submit" class="btn btn-primary">Create party</button>
+	</form>
+}
+
+type PartyMember struct {
+	Name      string
+	AvatarURL string
+}
+
+templ PartyRoster(members []PartyMember) {
+	<section aria-label="Party members">
+		<h1 class="text-lg font-bold">Party members</h1>
+		<ul>
+			for _, member := range members {
+				<li class="flex items-center gap-2">
+					<img src={ member.AvatarURL }/>
+					<span>{ member.Name }</span>
+				</li>
+			}
+		</ul>
+	</section>
+}
+
+templ LeaveConfirmation(partyID string) {
+	<section id="leave-confirmation" aria-label="Leave party">
+		<p>Are you sure you want to leave this party?</p>
+		<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/leave") } hx-post={ "/parties/" + partyID + "/leave" } hx-target="#leave-confirmation" hx-swap="outerHTML">
+			<button type="submit" name="confirm" value="yes" class="btn btn-primary">Confirm</button>
+			<a href="/" class="btn" onclick="this.closest('section').remove(); return false;">Cancel</a>
+		</form>
+	</section>
+}
+
+type StepDownCandidate struct {
+	UserID int64
+	Name   string
+}
+
+templ StepDownControl(partyID string, candidates []StepDownCandidate) {
+	<section id="step-down-control" aria-label="Step down as leader">
+		if len(candidates) == 0 {
+			<p class="text-sm opacity-70">You are the only member of this party, so leadership cannot be handed off.</p>
+		} else {
+			<p>Hand off leadership to another member:</p>
+			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/step-down") } hx-post={ "/parties/" + partyID + "/step-down" } hx-target="#step-down-control" hx-swap="outerHTML">
+				for _, candidate := range candidates {
+					<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-primary">{ candidate.Name }</button>
+				}
+			</form>
+		}
+	</section>
+}
+
+type InviteCandidate struct {
+	UserID int64
+	Name   string
+}
+
+templ InvitePicker(partyID string, candidates []InviteCandidate) {
+	<section aria-label="Invite friends">
+		if len(candidates) == 0 {
+			<p class="text-sm opacity-70">No friends are available to invite.</p>
+		} else {
+			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/send") } hx-post={ "/parties/" + partyID + "/invites/send" } hx-target="closest section" hx-swap="outerHTML">
+				for _, candidate := range candidates {
+					<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-primary">{ candidate.Name }</button>
+				}
+			</form>
+		}
+	</section>
+}
+
+templ AcceptInviteControl(partyID string) {
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/accept") } hx-post={ "/parties/" + partyID + "/invites/accept" } hx-target="this" hx-swap="outerHTML">
+		<button type="submit" class="btn btn-primary">Accept invite</button>
+	</form>
+}
+
+templ RejectInviteControl(partyID string) {
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/reject") } hx-post={ "/parties/" + partyID + "/invites/reject" } hx-target="this" hx-swap="outerHTML">
+		<button type="submit" class="btn">Reject invite</button>
+	</form>
 }
 
 templ Banner() {
