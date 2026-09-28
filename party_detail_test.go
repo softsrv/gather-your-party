@@ -121,7 +121,7 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 				if friendCalls != 1 {
 					t.Fatalf("friends requests=%d", friendCalls)
 				}
-				if !tc.friendsError && (playerCalls != 1 || store.candidateCall != 1 || store.candidateParty != testPartyID || store.candidateActing != 42 || len(store.candidateFriends) != 1 || store.candidateFriends[0] != friendID) {
+				if !tc.friendsError && (playerCalls != 0 || store.candidateCall != 1 || store.candidateParty != testPartyID || store.candidateActing != 42 || len(store.candidateFriends) != 1 || store.candidateFriends[0] != friendID) {
 					t.Fatalf("incorrect candidate lookup: players=%d store=%+v", playerCalls, store)
 				}
 			} else if friendCalls != 0 || playerCalls != 0 || store.candidateCall != 0 {
