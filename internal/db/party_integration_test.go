@@ -162,17 +162,88 @@ func TestLeavePartyOnlyActingMembershipIncludingLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertMembership(party, member, false)
+	if err := store.LeaveParty(ctx, "invalid-uuid", leader); err == nil {
+		t.Fatal("invalid UUID must return an error")
+	}
+}
+
+// [CLM-1] A party that still has at least one member after someone leaves is
+// NOT deleted: the silent last-member delete fires only when no memberships
+// remain.
+func TestLeavePartyStillPopulatedPartyIsNotDeleted(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000090")
+	member := partyTestUser(t, store, ctx, "76561198000000091")
+	party, err := store.CreateParty(ctx, leader, "Still populated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.LeaveParty(ctx, party, member); err != nil {
 		t.Fatal(err)
 	}
-	// This slice deliberately does not remove empty parties; the party has no
-	// members left so leader_id is untouched (no successor to promote).
-	var gotLeader int64
-	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leader {
-		t.Fatalf("party or leadership changed: %d, %v", gotLeader, err)
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM parties WHERE id = $1)`, party).Scan(&exists); err != nil || !exists {
+		t.Fatalf("party must still exist: exists=%t, err=%v", exists, err)
 	}
-	if err := store.LeaveParty(ctx, "invalid-uuid", leader); err == nil {
-		t.Fatal("invalid UUID must return an error")
+	var leaderStillMember bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, leader).Scan(&leaderStillMember); err != nil || !leaderStillMember {
+		t.Fatalf("remaining member's membership must be intact: exists=%t, err=%v", leaderStillMember, err)
+	}
+}
+
+// [CLM-2] When the last remaining member leaves a party, the leave path
+// removes that now-empty party's row so the party no longer exists.
+func TestLeavePartyLastMemberDeletesParty(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000092")
+	party, err := store.CreateParty(ctx, leader, "Sole member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, leader); err != nil {
+		t.Fatal(err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM parties WHERE id = $1)`, party).Scan(&exists); err != nil || exists {
+		t.Fatalf("emptied party must be deleted: exists=%t, err=%v", exists, err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM parties WHERE id = $1`, party).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("party count = %d, err=%v, want 0", count, err)
+	}
+}
+
+// [CLM-3] Deleting an emptied party through the leave path cascades: no
+// orphaned memberships, invites, or rejection tallies remain for it.
+func TestLeavePartyCascadeLeavesNoOrphans(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000093")
+	invitee := partyTestUser(t, store, ctx, "76561198000000094")
+	party, err := store.CreateParty(ctx, leader, "Cascade test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id) VALUES ($1, $2, $3)`, party, invitee, leader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO rejection_tallies (party_id, user_id, count) VALUES ($1, $2, $3)`, party, invitee, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, leader); err != nil {
+		t.Fatal(err)
+	}
+	var membershipCount, inviteCount, tallyCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, party).Scan(&membershipCount); err != nil || membershipCount != 0 {
+		t.Fatalf("orphaned memberships = %d, err=%v", membershipCount, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM invites WHERE party_id = $1`, party).Scan(&inviteCount); err != nil || inviteCount != 0 {
+		t.Fatalf("orphaned invites = %d, err=%v", inviteCount, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM rejection_tallies WHERE party_id = $1`, party).Scan(&tallyCount); err != nil || tallyCount != 0 {
+		t.Fatalf("orphaned rejection_tallies = %d, err=%v", tallyCount, err)
 	}
 }
 

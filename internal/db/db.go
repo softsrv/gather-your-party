@@ -122,7 +122,9 @@ func (s *Store) CreateParty(ctx context.Context, leaderUserID int64, name string
 // LeaveParty removes the acting user's membership. If the acting user was the
 // party's leader and other members remain, leadership passes automatically to
 // the earliest-joined remaining member (joined_at, then user_id, as a stable
-// tiebreaker). Empty-party cleanup is handled separately.
+// tiebreaker). If the leave empties the party of all members, the party row
+// itself is deleted, cascading to its memberships, invites, and rejection
+// tallies.
 func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -148,14 +150,26 @@ func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int
 			LIMIT 1`, partyID).Scan(&successor)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
-			// No members remain; leave leader_id as-is. Empty-party cleanup
-			// is handled elsewhere.
+			// No members remain; leave leader_id as-is. The empty-party
+			// delete below (independent of who was leader) removes the row.
 		case err != nil:
 			return fmt.Errorf("leave party: find successor: %w", err)
 		default:
 			if _, err := tx.Exec(ctx, `UPDATE parties SET leader_id = $1 WHERE id = $2`, successor, partyID); err != nil {
 				return fmt.Errorf("leave party: update leader: %w", err)
 			}
+		}
+	}
+
+	// This check is independent of who was leader: a non-leader can also be
+	// the last member to leave (e.g. after the leader already departed).
+	var remaining int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, partyID).Scan(&remaining); err != nil {
+		return fmt.Errorf("leave party: count remaining members: %w", err)
+	}
+	if remaining == 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM parties WHERE id = $1`, partyID); err != nil {
+			return fmt.Errorf("leave party: delete emptied party: %w", err)
 		}
 	}
 
