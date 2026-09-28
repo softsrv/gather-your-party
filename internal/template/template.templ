@@ -54,9 +54,13 @@ templ PartiesPage(parties []component.UserParty, invites []component.UserPending
 	}
 }
 
-templ PartyDetail(members []component.PartyMember) {
+templ PartyDetail(partyID string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate) {
 	@Base("Party details") {
 		@component.PartyRoster(members)
+		if isLeader {
+			@component.InvitePicker(partyID, inviteCandidates)
+			@component.StepDownControl(partyID, stepDownCandidates)
+		}
 	}
 }
 

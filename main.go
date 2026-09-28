@@ -318,10 +318,33 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 		return
 	}
 	roster := make([]component.PartyMember, 0, len(members))
+	isLeader := false
 	for _, member := range members {
 		roster = append(roster, component.PartyMember{Name: member.Name, AvatarURL: member.AvatarURL})
+		if member.UserID == userID && member.IsLeader {
+			isLeader = true
+		}
 	}
-	if err := template.PartyDetail(roster).Render(ctx, w); err != nil {
+	var inviteCandidates []component.InviteCandidate
+	var stepDownCandidates []component.StepDownCandidate
+	if isLeader {
+		service := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+		deadline := time.Now().Add(5000 * time.Millisecond)
+		newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
+		defer cancelCtx()
+		steamID := ctx.Context.Value(middleware.SteamID{}).(string)
+		inviteCandidates, err = view.BuildInviteCandidates(newCtx, service, app.store, partyID, userID, steamID)
+		if err != nil {
+			http.Error(w, "unable to load invite candidates", http.StatusInternalServerError)
+			return
+		}
+		for _, member := range members {
+			if member.UserID != userID {
+				stepDownCandidates = append(stepDownCandidates, component.StepDownCandidate{UserID: member.UserID, Name: member.Name})
+			}
+		}
+	}
+	if err := template.PartyDetail(partyID, roster, isLeader, inviteCandidates, stepDownCandidates).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }

@@ -187,13 +187,15 @@ type PartyMember struct {
 	UserID    int64
 	Name      string
 	AvatarURL string
+	IsLeader  bool
 }
 
 // PartyMembers lists members in seniority order, with user ID breaking ties.
 func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT users.id, users.persona_name, users.avatar_small
+		SELECT users.id, users.persona_name, users.avatar_small, users.id = parties.leader_id
 		FROM memberships JOIN users ON memberships.user_id = users.id
+		JOIN parties ON memberships.party_id = parties.id
 		WHERE memberships.party_id = $1
 		ORDER BY memberships.joined_at, users.id`, partyID)
 	if err != nil {
@@ -203,7 +205,7 @@ func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember
 	members := make([]PartyMember, 0)
 	for rows.Next() {
 		var member PartyMember
-		if err := rows.Scan(&member.UserID, &member.Name, &member.AvatarURL); err != nil {
+		if err := rows.Scan(&member.UserID, &member.Name, &member.AvatarURL, &member.IsLeader); err != nil {
 			return nil, fmt.Errorf("party members: scan: %w", err)
 		}
 		members = append(members, member)

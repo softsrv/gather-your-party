@@ -105,6 +105,8 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id,joined_at) VALUES ($1,$2,$3), ($1,$4,$5)`, party, members[2].UserID, joined, members[1].UserID, joined.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	members[0].IsLeader = true
+	members[3].IsLeader = true
 	got, err := store.PartyMembers(ctx, party)
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +118,18 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("member %d=%+v want=%+v", i, got[i], want[i])
+		}
+	}
+	if err := store.StepDown(ctx, party, members[0].UserID, members[1].UserID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.PartyMembers(ctx, party)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("members after step-down=%+v err=%v", got, err)
+	}
+	for _, member := range got {
+		if member.IsLeader != (member.UserID == members[1].UserID) {
+			t.Errorf("leadership marker did not follow current leader: %+v", member)
 		}
 	}
 	if got, err := store.PartyMembers(ctx, other); err != nil || len(got) != 1 || got[0] != members[3] {
