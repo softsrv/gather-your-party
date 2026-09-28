@@ -348,17 +348,17 @@ func TestPartyDetailNonMemberGuardRealStore(t *testing.T) {
 }
 
 type pickerIntegrationFriends struct {
-	players   []steamapi.Player
+	friends   []steamapi.Friend
 	requested string
 }
 
-func (s *pickerIntegrationFriends) Friends(_ context.Context, steamID string) ([]steamapi.Player, error) {
+func (s *pickerIntegrationFriends) Friends(_ context.Context, steamID string) ([]steamapi.Friend, error) {
 	s.requested = steamID
-	return s.players, nil
+	return s.friends, nil
 }
 
 // CLM-5/6: drive the exported view builder against the real store, substituting
-// only Steam's network boundary with its declared Player response shape.
+// only Steam's network boundary with its declared Friend response shape.
 func TestInvitePickerBuilderRealStore(t *testing.T) {
 	store, pool, ctx := inviteIntegrationStore(t)
 	steamIDs := []string{"76561198000000401", "76561198000000402", "76561198000000403", "76561198000000404", "76561198000000405"}
@@ -384,9 +384,9 @@ func TestInvitePickerBuilderRealStore(t *testing.T) {
 	if err := store.SendInvite(ctx, party, ids[0], ids[2]); err != nil {
 		t.Fatal(err)
 	}
-	service := &pickerIntegrationFriends{players: []steamapi.Player{
+	service := &pickerIntegrationFriends{friends: []steamapi.Friend{
 		{SteamID: steamIDs[0]}, {SteamID: steamIDs[1]}, {SteamID: steamIDs[2]},
-		{SteamID: steamIDs[3], PersonaName: "Live name"}, {SteamID: "76561198999999999"},
+		{SteamID: steamIDs[3]}, {SteamID: "76561198999999999"},
 	}}
 	got, err := view.BuildInviteCandidates(ctx, service, store, party, ids[0], steamIDs[0])
 	if err != nil {
@@ -396,7 +396,7 @@ func TestInvitePickerBuilderRealStore(t *testing.T) {
 		t.Fatalf("requested=%s candidates=%+v", service.requested, got)
 	}
 	// A second build must fetch the current roster rather than reuse stale friends.
-	service.players = nil
+	service.friends = nil
 	got, err = view.BuildInviteCandidates(ctx, service, store, party, ids[0], steamIDs[0])
 	if err != nil || len(got) != 0 {
 		t.Fatalf("empty live roster: %+v %v", got, err)

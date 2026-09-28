@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/softsrv/steamapi/steamapi"
+	"golang.org/x/sync/errgroup"
 )
 
 type inviteFriendsService interface {
-	Friends(context.Context, string) ([]steamapi.Player, error)
+	Friends(context.Context, string) ([]steamapi.Friend, error)
 }
 
 type inviteCandidateStore interface {
@@ -113,7 +114,7 @@ func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Req
 	deadline := time.Now().Add(5000 * time.Millisecond)
 	newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
 	defer cancelCtx()
-	games, err := SteamService.Games(newCtx, playerId)
+	games, err := SteamService.Games(newCtx, playerId, true, true)
 	if err != nil {
 		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
 			fmt.Printf("render error: %s\n", err)
@@ -148,7 +149,19 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if err := template.FriendsList(friends).Render(ctx, w); err != nil {
+	friendIDs := make([]string, 0, len(friends))
+	for _, friend := range friends {
+		friendIDs = append(friendIDs, friend.SteamID)
+	}
+	roster, err := SteamService.Players(newCtx, friendIDs)
+	if err != nil {
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
+
+	if err := template.FriendsList(roster).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -184,9 +197,32 @@ func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *ht
 	}
 	friendIDs := r.Form["friendID"]
 
-	games, err := SteamService.SharedGames(newCtx, playerId, friendIDs...)
-	if err != nil {
-		if messages, ok := sharedGamesNoGamesMessages(err, friends); ok {
+	rosterIDs := make([]string, 0, len(friends))
+	for _, friend := range friends {
+		rosterIDs = append(rosterIDs, friend.SteamID)
+	}
+	var roster []steamapi.Player
+	var games []steamapi.Game
+	var sharedGamesErr error
+	var fetches errgroup.Group
+	fetches.Go(func() error {
+		var err error
+		roster, err = SteamService.Players(newCtx, rosterIDs)
+		return err
+	})
+	fetches.Go(func() error {
+		games, sharedGamesErr = SteamService.SharedGames(newCtx, playerId, friendIDs...)
+		// Preserve NoGamesError until the roster is available for its messages.
+		return nil
+	})
+	if err := fetches.Wait(); err != nil {
+		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
+	if err := sharedGamesErr; err != nil {
+		if messages, ok := sharedGamesNoGamesMessages(err, roster); ok {
 			if err := template.ErrorMessages(messages).Render(ctx, w); err != nil {
 				fmt.Printf("render error: %s\n", err)
 			}

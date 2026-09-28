@@ -13,12 +13,12 @@ import (
 )
 
 type inviteFriendsStub struct {
-	friends []steamapi.Player
+	friends []steamapi.Friend
 	err     error
 	steamID string
 }
 
-func (s *inviteFriendsStub) Friends(_ context.Context, steamID string) ([]steamapi.Player, error) {
+func (s *inviteFriendsStub) Friends(_ context.Context, steamID string) ([]steamapi.Friend, error) {
 	s.steamID = steamID
 	return s.friends, s.err
 }
@@ -39,7 +39,7 @@ func (s *inviteCandidatesStub) InviteCandidates(_ context.Context, partyID strin
 }
 
 func TestBuildInviteCandidates(t *testing.T) {
-	service := &inviteFriendsStub{friends: []steamapi.Player{{SteamID: "76561198000000002", PersonaName: "Live name"}, {SteamID: "76561198000000003"}}}
+	service := &inviteFriendsStub{friends: []steamapi.Friend{{SteamID: "76561198000000002"}, {SteamID: "76561198000000003"}}}
 	store := &inviteCandidatesStub{candidates: []db.InviteCandidate{{UserID: 987, Name: "Stored name"}}}
 	got, err := BuildInviteCandidates(context.Background(), service, store, "party", 123, "76561198000000001")
 	if err != nil {
