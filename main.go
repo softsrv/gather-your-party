@@ -41,6 +41,8 @@ type sessionStore interface {
 	DeleteSession(context.Context, string) error
 	ResolveUserID(context.Context, string) (int64, bool, error)
 	CreateParty(context.Context, int64, string) (string, error)
+	UserParties(context.Context, int64) ([]db.UserParty, error)
+	UserPendingInvites(context.Context, int64) ([]db.UserPendingInvite, error)
 	PartyMembers(context.Context, string) ([]db.PartyMember, error)
 	IsMember(context.Context, string, int64) (bool, error)
 	LeaveParty(context.Context, string, int64) error
@@ -199,6 +201,76 @@ func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// sessionUserID accepts identity only from the verified session middleware.
+func (app *application) sessionUserID(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (int64, bool) {
+	steamID, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	if !ok || steamID == "" {
+		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
+		return 0, false
+	}
+	userID, found, err := app.store.ResolveUserID(r.Context(), steamID)
+	if err != nil {
+		http.Error(w, "unable to resolve user", http.StatusInternalServerError)
+		return 0, false
+	}
+	if !found {
+		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
+		return 0, false
+	}
+	return userID, true
+}
+
+func (app *application) handleParties(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := app.sessionUserID(ctx, w, r)
+	if !ok {
+		return
+	}
+	parties, err := app.store.UserParties(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "unable to load parties", http.StatusInternalServerError)
+		return
+	}
+	invites, err := app.store.UserPendingInvites(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "unable to load invites", http.StatusInternalServerError)
+		return
+	}
+	current := make([]component.UserParty, 0, len(parties))
+	for _, party := range parties {
+		current = append(current, component.UserParty{PartyID: party.PartyID, Name: party.Name})
+	}
+	pending := make([]component.UserPendingInvite, 0, len(invites))
+	for _, invite := range invites {
+		pending = append(pending, component.UserPendingInvite{PartyID: invite.PartyID, Name: invite.Name})
+	}
+	if err := template.PartiesPage(current, pending).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
+func (app *application) handleCreateParty(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := app.sessionUserID(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	partyID, err := app.store.CreateParty(r.Context(), userID, r.PostForm.Get("name"))
+	if err != nil {
+		http.Error(w, "unable to create party", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		// Navigate to the new party instead of swapping an empty response into the form.
+		w.Header().Set("HX-Redirect", "/parties/"+partyID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/parties/"+partyID, http.StatusSeeOther)
 }
 
 // leaveIdentity accepts identity only from the verified session middleware.
@@ -423,6 +495,12 @@ func (app *application) routes() http.Handler {
 		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
 	})
 
+	mux.HandleFunc("GET /parties", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleParties, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleCreateParty, auth.LoadSteamId)
+	})
 	mux.HandleFunc("GET /parties/{partyID}", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handlePartyDetail, auth.LoadSteamId)
 	})

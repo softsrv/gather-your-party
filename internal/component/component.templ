@@ -33,6 +33,49 @@ templ Navbar(player steamapi.Player, username string) {
 	</div>
 }
 
+type UserParty struct {
+	PartyID string
+	Name    string
+}
+
+type UserPendingInvite struct {
+	PartyID string
+	Name    string
+}
+
+templ PartiesTabs(parties []UserParty, invites []UserPendingInvite) {
+	<div role="tablist" class="tabs tabs-lifted">
+		<input type="radio" name="parties-tabs" id="current-parties-tab" role="tab" class="tab" aria-label="Current parties" aria-controls="current-parties-panel" checked/>
+		<section id="current-parties-panel" role="tabpanel" aria-labelledby="current-parties-tab" class="tab-content bg-base-100 p-6">
+			<ul>
+				for _, party := range parties {
+					<li><a href={ templ.SafeURL("/parties/" + party.PartyID) }>{ party.Name }</a></li>
+				}
+			</ul>
+		</section>
+		<input type="radio" name="parties-tabs" id="invites-tab" role="tab" class="tab" aria-label="Invites" aria-controls="invites-panel"/>
+		<section id="invites-panel" role="tabpanel" aria-labelledby="invites-tab" class="tab-content bg-base-100 p-6">
+			<ul>
+				for _, invite := range invites {
+					<li>
+						<span>{ invite.Name }</span>
+						@AcceptInviteControl(invite.PartyID)
+						@RejectInviteControl(invite.PartyID)
+					</li>
+				}
+			</ul>
+		</section>
+	</div>
+}
+
+templ CreatePartyForm() {
+	<form method="post" action="/parties" hx-post="/parties">
+		<label for="party-name">Party name</label>
+		<input type="text" id="party-name" name="name" class="input input-bordered" required/>
+		<button type="submit" class="btn btn-primary">Create party</button>
+	</form>
+}
+
 type PartyMember struct {
 	Name      string
 	AvatarURL string

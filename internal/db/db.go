@@ -120,6 +120,68 @@ func (s *Store) CreateParty(ctx context.Context, leaderUserID int64, name string
 	return partyID, nil
 }
 
+// UserParty is a party the user belongs to.
+type UserParty struct {
+	PartyID string
+	Name    string
+}
+
+// UserParties lists the user's memberships in stable party creation order.
+func (s *Store) UserParties(ctx context.Context, userID int64) ([]UserParty, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT parties.id, parties.name
+		FROM memberships JOIN parties ON memberships.party_id = parties.id
+		WHERE memberships.user_id = $1
+		ORDER BY parties.created_at, parties.id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("user parties: %w", err)
+	}
+	defer rows.Close()
+	parties := make([]UserParty, 0)
+	for rows.Next() {
+		var party UserParty
+		if err := rows.Scan(&party.PartyID, &party.Name); err != nil {
+			return nil, fmt.Errorf("user parties: scan: %w", err)
+		}
+		parties = append(parties, party)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("user parties: rows: %w", err)
+	}
+	return parties, nil
+}
+
+// UserPendingInvite identifies a party that has invited the user.
+type UserPendingInvite struct {
+	PartyID string
+	Name    string
+}
+
+// UserPendingInvites lists only invitations still awaiting this user's reply.
+func (s *Store) UserPendingInvites(ctx context.Context, userID int64) ([]UserPendingInvite, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT parties.id, parties.name
+		FROM invites JOIN parties ON invites.party_id = parties.id
+		WHERE invites.user_id = $1 AND invites.status = 'pending'
+		ORDER BY invites.created_at, invites.id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("user pending invites: %w", err)
+	}
+	defer rows.Close()
+	invites := make([]UserPendingInvite, 0)
+	for rows.Next() {
+		var invite UserPendingInvite
+		if err := rows.Scan(&invite.PartyID, &invite.Name); err != nil {
+			return nil, fmt.Errorf("user pending invites: scan: %w", err)
+		}
+		invites = append(invites, invite)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("user pending invites: rows: %w", err)
+	}
+	return invites, nil
+}
+
 // PartyMember is a member's stored identity and small-avatar profile.
 type PartyMember struct {
 	UserID    int64

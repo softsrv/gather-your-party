@@ -18,6 +18,19 @@ const testPartyID = "61daf402-9c06-4c3b-923f-5f7dfd4369c7"
 
 type leaveStore struct {
 	fakeSessionStore
+	invalidSession     bool
+	createCalls        int
+	createUser         int64
+	createName         string
+	createErr          error
+	parties            []db.UserParty
+	invites            []db.UserPendingInvite
+	partiesCalls       int
+	invitesCalls       int
+	partiesUser        int64
+	invitesUser        int64
+	partiesErr         error
+	invitesErr         error
 	identity           string
 	found              bool
 	resolveErr         error
@@ -52,7 +65,28 @@ type leaveStore struct {
 }
 
 func (s *leaveStore) ResolveSession(context.Context, string) (string, bool, error) {
+	if s.invalidSession {
+		return "", false, nil
+	}
 	return testSteamID, true, nil
+}
+
+func (s *leaveStore) CreateParty(_ context.Context, userID int64, name string) (string, error) {
+	s.createCalls++
+	s.createUser, s.createName = userID, name
+	return testPartyID, s.createErr
+}
+
+func (s *leaveStore) UserParties(_ context.Context, userID int64) ([]db.UserParty, error) {
+	s.partiesCalls++
+	s.partiesUser = userID
+	return s.parties, s.partiesErr
+}
+
+func (s *leaveStore) UserPendingInvites(_ context.Context, userID int64) ([]db.UserPendingInvite, error) {
+	s.invitesCalls++
+	s.invitesUser = userID
+	return s.invites, s.invitesErr
 }
 
 func (s *leaveStore) ResolveUserID(_ context.Context, steamID string) (int64, bool, error) {

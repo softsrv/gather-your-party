@@ -46,6 +46,14 @@ templ Home(player steamapi.Player, title string, pageName PageState) {
 	}
 }
 
+templ PartiesPage(parties []component.UserParty, invites []component.UserPendingInvite) {
+	@Base("Parties") {
+		<h1 class="text-lg font-bold">Parties</h1>
+		@component.PartiesTabs(parties, invites)
+		@component.CreatePartyForm()
+	}
+}
+
 templ PartyDetail(members []component.PartyMember) {
 	@Base("Party details") {
 		@component.PartyRoster(members)

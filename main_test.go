@@ -145,6 +145,14 @@ func (s *fakeSessionStore) CreateParty(context.Context, int64, string) (string, 
 	return "", errors.New("unexpected CreateParty call")
 }
 
+func (s *fakeSessionStore) UserParties(context.Context, int64) ([]db.UserParty, error) {
+	return nil, errors.New("unexpected UserParties call")
+}
+
+func (s *fakeSessionStore) UserPendingInvites(context.Context, int64) ([]db.UserPendingInvite, error) {
+	return nil, errors.New("unexpected UserPendingInvites call")
+}
+
 func (s *fakeSessionStore) PartyMembers(context.Context, string) ([]db.PartyMember, error) {
 	return nil, errors.New("unexpected PartyMembers call")
 }
