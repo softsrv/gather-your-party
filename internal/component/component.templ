@@ -1,6 +1,10 @@
 package component
 
-import "github.com/softsrv/steamapi/steamapi"
+import (
+	"strconv"
+
+	"github.com/softsrv/steamapi/steamapi"
+)
 
 templ Navbar(player steamapi.Player, username string) {
 	<div class="navbar bg-base-100">
@@ -36,6 +40,26 @@ templ LeaveConfirmation(partyID string) {
 			<button type="submit" name="confirm" value="yes" class="btn btn-primary">Confirm</button>
 			<a href="/" class="btn" onclick="this.closest('section').remove(); return false;">Cancel</a>
 		</form>
+	</section>
+}
+
+type StepDownCandidate struct {
+	UserID int64
+	Name   string
+}
+
+templ StepDownControl(partyID string, candidates []StepDownCandidate) {
+	<section id="step-down-control" aria-label="Step down as leader">
+		if len(candidates) == 0 {
+			<p class="text-sm opacity-70">You are the only member of this party, so leadership cannot be handed off.</p>
+		} else {
+			<p>Hand off leadership to another member:</p>
+			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/step-down") } hx-post={ "/parties/" + partyID + "/step-down" } hx-target="#step-down-control" hx-swap="outerHTML">
+				for _, candidate := range candidates {
+					<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-primary">{ candidate.Name }</button>
+				}
+			</form>
+		}
 	</section>
 }
 

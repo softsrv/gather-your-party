@@ -16,13 +16,18 @@ const testPartyID = "61daf402-9c06-4c3b-923f-5f7dfd4369c7"
 
 type leaveStore struct {
 	fakeSessionStore
-	identity   string
-	found      bool
-	resolveErr error
-	leaveErr   error
-	partyID    string
-	actingID   int64
-	leaveCalls int
+	identity       string
+	found          bool
+	resolveErr     error
+	leaveErr       error
+	partyID        string
+	actingID       int64
+	leaveCalls     int
+	stepDownErr    error
+	stepDownCall   int
+	stepDownParty  string
+	stepDownActing int64
+	stepDownTarget int64
 }
 
 func (s *leaveStore) ResolveSession(context.Context, string) (string, bool, error) {
@@ -38,6 +43,12 @@ func (s *leaveStore) LeaveParty(_ context.Context, partyID string, actingID int6
 	s.leaveCalls++
 	s.partyID, s.actingID = partyID, actingID
 	return s.leaveErr
+}
+
+func (s *leaveStore) StepDown(_ context.Context, partyID string, actingID int64, targetID int64) error {
+	s.stepDownCall++
+	s.stepDownParty, s.stepDownActing, s.stepDownTarget = partyID, actingID, targetID
+	return s.stepDownErr
 }
 
 func leaveRequest(method, path, body string, authenticated bool) *http.Request {
@@ -144,5 +155,71 @@ func TestLeaveStoreError(t *testing.T) {
 	app.routes().ServeHTTP(w, leaveRequest("POST", "/parties/"+testPartyID+"/leave", "confirm=yes", true))
 	if w.Code != http.StatusInternalServerError || store.leaveCalls != 1 || strings.Contains(w.Body.String(), "private") {
 		t.Fatalf("failed leave: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Exercises the production router, authentication middleware and step-down
+// wiring analogous to TestLeaveRoutes.
+func TestStepDownRoutes(t *testing.T) {
+	store := &leaveStore{found: true}
+	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+	router := app.routes()
+	path := "/parties/" + testPartyID + "/step-down"
+
+	w := httptest.NewRecorder()
+	r := leaveRequest(http.MethodPost, path, "target=7&user_id=999&steamID=forged", true)
+	r.Header.Set("HX-Request", "true")
+	router.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || w.Body.Len() != 0 || store.stepDownCall != 1 ||
+		store.stepDownParty != testPartyID || store.stepDownActing != 42 || store.stepDownTarget != 7 || store.identity != testSteamID {
+		t.Fatalf("step down: status=%d, calls=%d, party=%s, actor=%d, target=%d, identity=%s",
+			w.Code, store.stepDownCall, store.stepDownParty, store.stepDownActing, store.stepDownTarget, store.identity)
+	}
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, leaveRequest(http.MethodPost, path, "target=8", true))
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatal("non-HTMX step down must redirect home")
+	}
+}
+
+func TestStepDownRejectsWithoutHandoff(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		method        string
+		path          string
+		body          string
+		authenticated bool
+		missingUser   bool
+		resolveErr    error
+		want          int
+	}{
+		// Unlike /leave, step-down registers only POST (no GET confirmation
+		// page), so an unauthenticated GET never reaches the handler at all
+		// and the mux reports 404 before any identity check runs.
+		{name: "anonymous GET", method: "GET", want: 404},
+		{name: "anonymous POST", method: "POST", body: "target=7", want: 401},
+		{name: "forged identity", method: "POST", body: "target=7&steamID=" + testSteamID, want: 401},
+		{name: "unknown user", method: "POST", body: "target=7", authenticated: true, missingUser: true, want: 401},
+		{name: "lookup failure", method: "POST", body: "target=7", authenticated: true, resolveErr: errors.New("database unavailable"), want: 500},
+		{name: "missing target", method: "POST", authenticated: true, want: 400},
+		{name: "non-numeric target", method: "POST", body: "target=not-a-number", authenticated: true, want: 400},
+		{name: "invalid UUID", method: "POST", path: "/parties/not-a-uuid/step-down", body: "target=7", authenticated: true, want: 400},
+		{name: "bad form", method: "POST", body: "target=%zz", authenticated: true, want: 400},
+		{name: "wrong method", method: "PUT", body: "target=7", authenticated: true, want: 405},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &leaveStore{found: !tc.missingUser, resolveErr: tc.resolveErr}
+			app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+			path := tc.path
+			if path == "" {
+				path = "/parties/" + testPartyID + "/step-down"
+			}
+			w := httptest.NewRecorder()
+			app.routes().ServeHTTP(w, leaveRequest(tc.method, path, tc.body, tc.authenticated))
+			if w.Code != tc.want || store.stepDownCall != 0 {
+				t.Fatalf("status=%d want=%d, stepDownCalls=%d", w.Code, tc.want, store.stepDownCall)
+			}
+		})
 	}
 }

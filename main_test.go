@@ -146,6 +146,10 @@ func (s *fakeSessionStore) LeaveParty(context.Context, string, int64) error {
 	return errors.New("unexpected LeaveParty call")
 }
 
+func (s *fakeSessionStore) StepDown(context.Context, string, int64, int64) error {
+	return errors.New("unexpected StepDown call")
+}
+
 func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 	received := make(chan url.Values, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

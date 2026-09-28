@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ type sessionStore interface {
 	ResolveUserID(context.Context, string) (int64, bool, error)
 	CreateParty(context.Context, int64, string) (string, error)
 	LeaveParty(context.Context, string, int64) error
+	StepDown(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error
 }
 
 type application struct {
@@ -249,6 +251,32 @@ func (app *application) handleLeaveParty(ctx *middleware.CustomContext, w http.R
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func (app *application) handleStepDown(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	targetID, err := strconv.ParseInt(r.PostForm.Get("target"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.StepDown(r.Context(), partyID, actingUserID, targetID); err != nil {
+		http.Error(w, "unable to step down", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func assertionIsValid(body string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if strings.TrimSuffix(line, "\r") == "is_valid:true" {
@@ -297,6 +325,9 @@ func (app *application) routes() http.Handler {
 	})
 	mux.HandleFunc("POST /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handleLeaveParty, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/step-down", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleStepDown, auth.LoadSteamId)
 	})
 	return mux
 }

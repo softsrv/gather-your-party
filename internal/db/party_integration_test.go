@@ -165,12 +165,245 @@ func TestLeavePartyOnlyActingMembershipIncludingLeader(t *testing.T) {
 	if err := store.LeaveParty(ctx, party, member); err != nil {
 		t.Fatal(err)
 	}
-	// This slice deliberately does not change leadership or remove empty parties.
+	// This slice deliberately does not remove empty parties; the party has no
+	// members left so leader_id is untouched (no successor to promote).
 	var gotLeader int64
 	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leader {
 		t.Fatalf("party or leadership changed: %d, %v", gotLeader, err)
 	}
 	if err := store.LeaveParty(ctx, "invalid-uuid", leader); err == nil {
 		t.Fatal("invalid UUID must return an error")
+	}
+}
+
+// [CLM-13] When the leader leaves a party with remaining members, leadership
+// passes automatically to the earliest-joined remaining member.
+func TestLeavePartySuccessionToEarliestJoinedRemainingMember(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000010")
+	b := partyTestUser(t, store, ctx, "76561198000000011")
+	c := partyTestUser(t, store, ctx, "76561198000000012")
+	party, err := store.CreateParty(ctx, leader, "Succession")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1,$2,$3)`, party, b, now.Add(1*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1,$2,$3)`, party, c, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, leader); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil {
+		t.Fatal(err)
+	}
+	if gotLeader != b {
+		t.Fatalf("leader_id = %d, want earliest-joined remaining member %d", gotLeader, b)
+	}
+}
+
+// [CLM-14] When a non-leader member leaves, leadership is unchanged.
+func TestLeavePartyNonLeaderDeparture(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000020")
+	member := partyTestUser(t, store, ctx, "76561198000000021")
+	party, err := store.CreateParty(ctx, leader, "Non-leader leaves")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LeaveParty(ctx, party, member); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil {
+		t.Fatal(err)
+	}
+	if gotLeader != leader {
+		t.Fatalf("leader_id = %d, want unchanged leader %d", gotLeader, leader)
+	}
+}
+
+// [CLM-12] joined_at totally orders a party's members by seniority.
+func TestMembershipsOrderedByJoinedAtReflectsSeniority(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000030")
+	b := partyTestUser(t, store, ctx, "76561198000000031")
+	c := partyTestUser(t, store, ctx, "76561198000000032")
+	party, err := store.CreateParty(ctx, leader, "Ordering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1,$2,$3)`, party, c, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1,$2,$3)`, party, b, now.Add(1*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT user_id FROM memberships WHERE party_id = $1 ORDER BY joined_at, user_id`, party)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var order []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		order = append(order, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []int64{leader, b, c}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order = %v, want %v", order, want)
+		}
+	}
+}
+
+// [CLM-2] StepDown sets leader_id to the target while the former leader
+// remains an ordinary member; no membership rows are added or removed.
+func TestStepDownTransfersLeadershipKeepsFormerLeaderAsMember(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leaderA := partyTestUser(t, store, ctx, "76561198000000040")
+	memberB := partyTestUser(t, store, ctx, "76561198000000041")
+	party, err := store.CreateParty(ctx, leaderA, "Step down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, memberB); err != nil {
+		t.Fatal(err)
+	}
+	var countBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, party).Scan(&countBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StepDown(ctx, party, leaderA, memberB); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != memberB {
+		t.Fatalf("leader_id = %d, err=%v, want %d", gotLeader, err, memberB)
+	}
+	var stillMember bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, leaderA).Scan(&stillMember); err != nil || !stillMember {
+		t.Fatalf("former leader membership missing: exists=%t, err=%v", stillMember, err)
+	}
+	var countAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, party).Scan(&countAfter); err != nil {
+		t.Fatal(err)
+	}
+	if countAfter != countBefore {
+		t.Fatalf("membership count changed: before=%d after=%d", countBefore, countAfter)
+	}
+}
+
+// [CLM-3] The target of a step-down may be any member, not only the
+// earliest-joined one.
+func TestStepDownTargetNeedNotBeEarliestJoined(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leaderA := partyTestUser(t, store, ctx, "76561198000000050")
+	memberB := partyTestUser(t, store, ctx, "76561198000000051")
+	memberC := partyTestUser(t, store, ctx, "76561198000000052")
+	party, err := store.CreateParty(ctx, leaderA, "Step down to junior")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1,$2,$3)`, party, memberB, now.Add(1*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id, joined_at) VALUES ($1,$2,$3)`, party, memberC, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StepDown(ctx, party, leaderA, memberC); err != nil {
+		t.Fatal(err)
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != memberC {
+		t.Fatalf("leader_id = %d, err=%v, want later-joined member %d", gotLeader, err, memberC)
+	}
+}
+
+// [CLM-4] Only the current leader can hand off leadership; a non-leader
+// member and a non-member are both rejected.
+func TestStepDownRejectsNonLeaderActor(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leaderA := partyTestUser(t, store, ctx, "76561198000000060")
+	memberB := partyTestUser(t, store, ctx, "76561198000000061")
+	outsider := partyTestUser(t, store, ctx, "76561198000000062")
+	party, err := store.CreateParty(ctx, leaderA, "Not the leader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, memberB); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StepDown(ctx, party, memberB, leaderA); err == nil {
+		t.Fatal("non-leader member must not be able to step down the leader")
+	}
+	if err := store.StepDown(ctx, party, outsider, memberB); err == nil {
+		t.Fatal("non-member must not be able to step down the leader")
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leaderA {
+		t.Fatalf("leader_id = %d, err=%v, want unchanged %d", gotLeader, err, leaderA)
+	}
+}
+
+// [CLM-5] Step-down is impossible when the leader is the party's sole member.
+func TestStepDownRejectsSoleMemberParty(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leaderA := partyTestUser(t, store, ctx, "76561198000000070")
+	outsider := partyTestUser(t, store, ctx, "76561198000000071")
+	party, err := store.CreateParty(ctx, leaderA, "Solo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StepDown(ctx, party, leaderA, outsider); err == nil {
+		t.Fatal("step down with no other member must be rejected")
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leaderA {
+		t.Fatalf("leader_id = %d, err=%v, want unchanged %d", gotLeader, err, leaderA)
+	}
+}
+
+// [CLM-6] The target of a step-down must already be a member of the party.
+func TestStepDownRejectsNonMemberTarget(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leaderA := partyTestUser(t, store, ctx, "76561198000000080")
+	memberB := partyTestUser(t, store, ctx, "76561198000000081")
+	outsider := partyTestUser(t, store, ctx, "76561198000000082")
+	party, err := store.CreateParty(ctx, leaderA, "Outsider target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, memberB); err != nil {
+		t.Fatal(err)
+	}
+	var outsiderIsMember bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, party, outsider).Scan(&outsiderIsMember); err != nil || outsiderIsMember {
+		t.Fatalf("outsider unexpectedly a member: %t, %v", outsiderIsMember, err)
+	}
+	if err := store.StepDown(ctx, party, leaderA, outsider); err == nil {
+		t.Fatal("step down to a non-member target must be rejected")
+	}
+	var gotLeader int64
+	if err := pool.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1`, party).Scan(&gotLeader); err != nil || gotLeader != leaderA {
+		t.Fatalf("leader_id = %d, err=%v, want unchanged %d", gotLeader, err, leaderA)
 	}
 }
