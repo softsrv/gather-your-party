@@ -251,6 +251,102 @@ func TestInviteRoutesRealStore(t *testing.T) {
 	}
 }
 
+// partyDetailGuardBypass substitutes only the authorization decision; roster and
+// identity queries still execute against the real database. This intervention
+// demonstrates that the denied response depends on the membership guard.
+type partyDetailGuardBypass struct {
+	*db.Store
+}
+
+func (s partyDetailGuardBypass) IsMember(context.Context, string, int64) (bool, error) {
+	return true, nil
+}
+
+// Party detail CLM-2: the same authenticated non-member is denied normally but
+// receives real member names/avatars when the guard decision is bypassed.
+// Removing the handler's guard makes the first absence assertions fail.
+func TestPartyDetailNonMemberGuardRealStore(t *testing.T) {
+	store, pool, ctx := inviteIntegrationStore(t)
+	profiles := []steamapi.Player{
+		{PersonaName: "Private leader", AvatarSmall: "https://example.com/private-leader.jpg"},
+		{PersonaName: "Private member", AvatarSmall: "https://example.com/private-member.jpg"},
+		{PersonaName: "Outsider", AvatarSmall: "https://example.com/outsider.jpg"},
+	}
+	ids := make([]int64, len(profiles))
+	for i, profile := range profiles {
+		var err error
+		ids[i], err = store.UpsertUser(ctx, fmt.Sprintf("765611980000006%02d", i), profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	party, err := store.CreateParty(ctx, ids[0], "Private roster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id) VALUES ($1,$2)`, party, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	// Being a member elsewhere must not grant access to this party.
+	if _, err := store.CreateParty(ctx, ids[2], "Outsider's party"); err != nil {
+		t.Fatal(err)
+	}
+	config := appConfig{SessionSecret: "party-detail-integration-secret"}
+	cookieFor := func(userID int64) *http.Cookie {
+		t.Helper()
+		token, err := store.CreateSession(ctx, userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mac := hmac.New(sha256.New, []byte(config.SessionSecret))
+		mac.Write([]byte(token))
+		return &http.Cookie{Name: "session", Value: token + "." + hex.EncodeToString(mac.Sum(nil))}
+	}
+	outsiderCookie := cookieFor(ids[2])
+	request := func(lookup sessionStore, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		app := application{store: lookup, config: config}
+		r := httptest.NewRequest(http.MethodGet, "/parties/"+party, nil).WithContext(ctx)
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		app.routes().ServeHTTP(w, r)
+		return w
+	}
+	assertRoster := func(w *httptest.ResponseRecorder, present bool) {
+		t.Helper()
+		for _, profile := range profiles[:2] {
+			for _, value := range []string{profile.PersonaName, profile.AvatarSmall} {
+				if strings.Contains(w.Body.String(), value) != present {
+					t.Errorf("roster value %q present=%t want=%t: %s", value, !present, present, w.Body.String())
+				}
+			}
+		}
+	}
+	denied := request(store, outsiderCookie)
+	assertRoster(denied, false)
+	if denied.Code != http.StatusForbidden {
+		t.Errorf("non-member status=%d want=403", denied.Code)
+	}
+	anonymous := request(store, nil)
+	assertRoster(anonymous, false)
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous status=%d want=401", anonymous.Code)
+	}
+	// Positive control: ordinary members, not just leaders, see the full roster.
+	allowed := request(store, cookieFor(ids[1]))
+	assertRoster(allowed, true)
+	if allowed.Code != http.StatusOK || strings.Contains(allowed.Body.String(), profiles[2].PersonaName) || strings.Contains(allowed.Body.String(), profiles[2].AvatarSmall) {
+		t.Errorf("member response=%d %s", allowed.Code, allowed.Body.String())
+	}
+	bypassed := request(partyDetailGuardBypass{store}, outsiderCookie)
+	assertRoster(bypassed, true)
+	if bypassed.Code != http.StatusOK {
+		t.Errorf("bypassed guard status=%d want=200", bypassed.Code)
+	}
+}
+
 type pickerIntegrationFriends struct {
 	players   []steamapi.Player
 	requested string

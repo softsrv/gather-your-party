@@ -71,6 +71,94 @@ func partyTestUser(t *testing.T, store *Store, ctx context.Context, steamID stri
 	return id
 }
 
+// Party detail CLM-4: real joins, party filtering, small avatars and stable seniority.
+func TestPartyMembersProfilesAndOrder(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	members := make([]PartyMember, 4)
+	for i := range members {
+		steamID := fmt.Sprintf("765611980000005%02d", i)
+		id := partyTestUser(t, store, ctx, steamID)
+		profile := steamapi.Player{
+			PersonaName:  fmt.Sprintf("Roster member %d", i),
+			AvatarSmall:  fmt.Sprintf("https://example.com/small-%d.jpg", i),
+			AvatarMedium: "https://example.com/medium.jpg",
+			AvatarFull:   "https://example.com/full.jpg",
+		}
+		if _, err := store.UpsertUser(ctx, steamID, profile); err != nil {
+			t.Fatal(err)
+		}
+		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarSmall}
+	}
+	party, err := store.CreateParty(ctx, members[0].UserID, "Roster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateParty(ctx, members[3].UserID, "Other roster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A higher ID joined first; equal timestamps on the other two require an ID tiebreaker.
+	joined := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET joined_at=$2 WHERE party_id=$1`, party, joined.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id,joined_at) VALUES ($1,$2,$3), ($1,$4,$5)`, party, members[2].UserID, joined, members[1].UserID, joined.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.PartyMembers(ctx, party)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PartyMember{members[2], members[0], members[1]}
+	if len(got) != len(want) {
+		t.Fatalf("members=%+v want=%+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("member %d=%+v want=%+v", i, got[i], want[i])
+		}
+	}
+	if got, err := store.PartyMembers(ctx, other); err != nil || len(got) != 1 || got[0] != members[3] {
+		t.Fatalf("other party members=%+v err=%v", got, err)
+	}
+	if err := store.LeaveParty(ctx, other, members[3].UserID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.PartyMembers(ctx, other); err != nil || len(got) != 0 {
+		t.Fatalf("deleted party members=%+v err=%v", got, err)
+	}
+	if _, err := store.PartyMembers(ctx, "not-a-uuid"); err == nil {
+		t.Fatal("invalid party ID must return an error")
+	}
+}
+
+// Party detail CLM-2: membership is scoped to both the party and the user.
+func TestIsMember(t *testing.T) {
+	store, _, ctx := partyTestStore(t)
+	member := partyTestUser(t, store, ctx, "76561198000000510")
+	outsider := partyTestUser(t, store, ctx, "76561198000000511")
+	party, err := store.CreateParty(ctx, member, "Members only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateParty(ctx, outsider, "Other party")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		party string
+		user  int64
+		want  bool
+	}{{party, member, true}, {party, outsider, false}, {other, member, false}, {other, outsider, true}} {
+		if got, err := store.IsMember(ctx, tc.party, tc.user); err != nil || got != tc.want {
+			t.Errorf("IsMember(%s, %d)=%t err=%v want=%t", tc.party, tc.user, got, err, tc.want)
+		}
+	}
+	if _, err := store.IsMember(ctx, "not-a-uuid", member); err == nil {
+		t.Fatal("invalid party ID must return an error")
+	}
+}
+
 func TestCreatePartyLeaderAndSoleMember(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
 	leader := partyTestUser(t, store, ctx, "76561198000000001")

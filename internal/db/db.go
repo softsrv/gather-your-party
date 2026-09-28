@@ -120,6 +120,47 @@ func (s *Store) CreateParty(ctx context.Context, leaderUserID int64, name string
 	return partyID, nil
 }
 
+// PartyMember is a member's stored identity and small-avatar profile.
+type PartyMember struct {
+	UserID    int64
+	Name      string
+	AvatarURL string
+}
+
+// PartyMembers lists members in seniority order, with user ID breaking ties.
+func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT users.id, users.persona_name, users.avatar_small
+		FROM memberships JOIN users ON memberships.user_id = users.id
+		WHERE memberships.party_id = $1
+		ORDER BY memberships.joined_at, users.id`, partyID)
+	if err != nil {
+		return nil, fmt.Errorf("party members: %w", err)
+	}
+	defer rows.Close()
+	members := make([]PartyMember, 0)
+	for rows.Next() {
+		var member PartyMember
+		if err := rows.Scan(&member.UserID, &member.Name, &member.AvatarURL); err != nil {
+			return nil, fmt.Errorf("party members: scan: %w", err)
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("party members: rows: %w", err)
+	}
+	return members, nil
+}
+
+// IsMember reports whether the user belongs to the specified party.
+func (s *Store) IsMember(ctx context.Context, partyID string, userID int64) (bool, error) {
+	var member bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, partyID, userID).Scan(&member); err != nil {
+		return false, fmt.Errorf("check membership: %w", err)
+	}
+	return member, nil
+}
+
 // LeaveParty removes the acting user's membership. If the acting user was the
 // party's leader and other members remain, leadership passes automatically to
 // the earliest-joined remaining member (joined_at, then user_id, as a stable

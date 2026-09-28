@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
 	"gather-your-party/internal/template"
@@ -40,6 +41,8 @@ type sessionStore interface {
 	DeleteSession(context.Context, string) error
 	ResolveUserID(context.Context, string) (int64, bool, error)
 	CreateParty(context.Context, int64, string) (string, error)
+	PartyMembers(context.Context, string) ([]db.PartyMember, error)
+	IsMember(context.Context, string, int64) (bool, error)
 	LeaveParty(context.Context, string, int64) error
 	StepDown(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error
 	SendInvite(context.Context, string, int64, int64) error
@@ -223,6 +226,34 @@ func (app *application) leaveIdentity(ctx *middleware.CustomContext, w http.Resp
 	return partyID, userID, true
 }
 
+func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, userID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	member, err := app.store.IsMember(r.Context(), partyID, userID)
+	if err != nil {
+		http.Error(w, "unable to check membership", http.StatusInternalServerError)
+		return
+	}
+	if !member {
+		http.Error(w, "party members only", http.StatusForbidden)
+		return
+	}
+	members, err := app.store.PartyMembers(r.Context(), partyID)
+	if err != nil {
+		http.Error(w, "unable to load party members", http.StatusInternalServerError)
+		return
+	}
+	roster := make([]component.PartyMember, 0, len(members))
+	for _, member := range members {
+		roster = append(roster, component.PartyMember{Name: member.Name, AvatarURL: member.AvatarURL})
+	}
+	if err := template.PartyDetail(roster).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
 func (app *application) handleLeaveConfirmation(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	partyID, _, ok := app.leaveIdentity(ctx, w, r)
 	if !ok {
@@ -392,6 +423,9 @@ func (app *application) routes() http.Handler {
 		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
 	})
 
+	mux.HandleFunc("GET /parties/{partyID}", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handlePartyDetail, auth.LoadSteamId)
+	})
 	mux.HandleFunc("GET /parties/{partyID}/leave", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handleLeaveConfirmation, auth.LoadSteamId)
 	})

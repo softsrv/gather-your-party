@@ -33,6 +33,25 @@ templ Navbar(player steamapi.Player, username string) {
 	</div>
 }
 
+type PartyMember struct {
+	Name      string
+	AvatarURL string
+}
+
+templ PartyRoster(members []PartyMember) {
+	<section aria-label="Party members">
+		<h1 class="text-lg font-bold">Party members</h1>
+		<ul>
+			for _, member := range members {
+				<li class="flex items-center gap-2">
+					<img src={ member.AvatarURL }/>
+					<span>{ member.Name }</span>
+				</li>
+			}
+		</ul>
+	</section>
+}
+
 templ LeaveConfirmation(partyID string) {
 	<section id="leave-confirmation" aria-label="Leave party">
 		<p>Are you sure you want to leave this party?</p>

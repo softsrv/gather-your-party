@@ -46,6 +46,12 @@ templ Home(player steamapi.Player, title string, pageName PageState) {
 	}
 }
 
+templ PartyDetail(members []component.PartyMember) {
+	@Base("Party details") {
+		@component.PartyRoster(members)
+	}
+}
+
 templ LeaveParty(partyID string) {
 	@Base("Leave party") {
 		@component.LeaveConfirmation(partyID)
