@@ -63,6 +63,37 @@ templ StepDownControl(partyID string, candidates []StepDownCandidate) {
 	</section>
 }
 
+type InviteCandidate struct {
+	UserID int64
+	Name   string
+}
+
+templ InvitePicker(partyID string, candidates []InviteCandidate) {
+	<section aria-label="Invite friends">
+		if len(candidates) == 0 {
+			<p class="text-sm opacity-70">No friends are available to invite.</p>
+		} else {
+			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/send") } hx-post={ "/parties/" + partyID + "/invites/send" } hx-target="closest section" hx-swap="outerHTML">
+				for _, candidate := range candidates {
+					<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-primary">{ candidate.Name }</button>
+				}
+			</form>
+		}
+	</section>
+}
+
+templ AcceptInviteControl(partyID string) {
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/accept") } hx-post={ "/parties/" + partyID + "/invites/accept" } hx-target="this" hx-swap="outerHTML">
+		<button type="submit" class="btn btn-primary">Accept invite</button>
+	</form>
+}
+
+templ RejectInviteControl(partyID string) {
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/reject") } hx-post={ "/parties/" + partyID + "/invites/reject" } hx-target="this" hx-swap="outerHTML">
+		<button type="submit" class="btn">Reject invite</button>
+	</form>
+}
+
 templ Banner() {
 	<header class="p-6 flex flex-col justify-between">
 		<img src="/static/svg/logo.svg" class="h-20 w-20"/>

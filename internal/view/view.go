@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"gather-your-party/internal/component"
+	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
 	"gather-your-party/internal/template"
 	"net/http"
@@ -13,6 +15,38 @@ import (
 
 	"github.com/softsrv/steamapi/steamapi"
 )
+
+type inviteFriendsService interface {
+	Friends(context.Context, string) ([]steamapi.Player, error)
+}
+
+type inviteCandidateStore interface {
+	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
+}
+
+// BuildInviteCandidates fetches the verified leader's live friends and builds
+// the picker model through the store's intersection and exclusions. Callers must
+// supply the SteamID and users.id resolved from the same verified session.
+// This helper is ready for the parties view; it does not introduce a new page.
+func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, store inviteCandidateStore, partyID string, actingLeaderUserID int64, verifiedSteamID string) ([]component.InviteCandidate, error) {
+	friends, err := service.Friends(ctx, verifiedSteamID)
+	if err != nil {
+		return nil, fmt.Errorf("invite picker: friends: %w", err)
+	}
+	friendIDs := make([]string, 0, len(friends))
+	for _, friend := range friends {
+		friendIDs = append(friendIDs, friend.SteamID)
+	}
+	known, err := store.InviteCandidates(ctx, partyID, actingLeaderUserID, friendIDs)
+	if err != nil {
+		return nil, fmt.Errorf("invite picker: candidates: %w", err)
+	}
+	candidates := make([]component.InviteCandidate, 0, len(known))
+	for _, candidate := range known {
+		candidates = append(candidates, component.InviteCandidate{UserID: candidate.UserID, Name: candidate.Name})
+	}
+	return candidates, nil
+}
 
 const noGamesMessageFormat = "no games found for user %s. Their list may be private"
 

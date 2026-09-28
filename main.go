@@ -42,6 +42,10 @@ type sessionStore interface {
 	CreateParty(context.Context, int64, string) (string, error)
 	LeaveParty(context.Context, string, int64) error
 	StepDown(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error
+	SendInvite(context.Context, string, int64, int64) error
+	AcceptInvite(context.Context, string, int64) error
+	RejectInvite(context.Context, string, int64) error
+	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
 }
 
 type application struct {
@@ -277,6 +281,74 @@ func (app *application) handleStepDown(ctx *middleware.CustomContext, w http.Res
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	targetID, err := strconv.ParseInt(r.PostForm.Get("target"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.SendInvite(r.Context(), partyID, actingUserID, targetID); err != nil {
+		http.Error(w, "unable to send invite", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleAcceptInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.AcceptInvite(r.Context(), partyID, actingUserID); err != nil {
+		http.Error(w, "unable to accept invite", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (app *application) handleRejectInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if err := app.store.RejectInvite(r.Context(), partyID, actingUserID); err != nil {
+		http.Error(w, "unable to reject invite", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func assertionIsValid(body string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if strings.TrimSuffix(line, "\r") == "is_valid:true" {
@@ -328,6 +400,15 @@ func (app *application) routes() http.Handler {
 	})
 	mux.HandleFunc("POST /parties/{partyID}/step-down", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handleStepDown, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/invites/send", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleSendInvite, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/invites/accept", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleAcceptInvite, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/invites/reject", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleRejectInvite, auth.LoadSteamId)
 	})
 	return mux
 }

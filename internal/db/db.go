@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/softsrv/steamapi/steamapi"
 )
@@ -221,6 +222,147 @@ func (s *Store) StepDown(ctx context.Context, partyID string, actingLeaderUserID
 		return fmt.Errorf("commit step down: %w", err)
 	}
 	return nil
+}
+
+// InviteCandidate is a known user eligible to appear in a party's invite picker.
+type InviteCandidate struct {
+	UserID int64
+	Name   string
+}
+
+// SendInvite records an invitation only for the current leader and below the
+// rejection limit. Locking the party serializes this with replies and leadership changes.
+func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin send invite: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentLeader int64
+	if err := tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&currentLeader); err != nil {
+		return fmt.Errorf("send invite: lookup party: %w", err)
+	}
+	if currentLeader != actingLeaderUserID {
+		return errors.New("send invite: acting user is not the party's leader")
+	}
+
+	var rejections int
+	err = tx.QueryRow(ctx, `SELECT count FROM rejection_tallies WHERE party_id = $1 AND user_id = $2`, partyID, targetUserID).Scan(&rejections)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("send invite: lookup rejection tally: %w", err)
+	}
+	if rejections >= 3 {
+		return errors.New("send invite: rejection limit reached")
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'pending')`, partyID, targetUserID, actingLeaderUserID); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "invites_pending_party_user_idx" {
+			// The failed transaction is rolled back by the defer; the existing
+			// pending invitation is unchanged and the repeated send succeeds.
+			return nil
+		}
+		return fmt.Errorf("send invite: insert: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit send invite: %w", err)
+	}
+	return nil
+}
+
+// AcceptInvite atomically joins the acting user and consumes their pending invite.
+func (s *Store) AcceptInvite(ctx context.Context, partyID string, actingUserID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin accept invite: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentLeader int64
+	if err := tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&currentLeader); err != nil {
+		return fmt.Errorf("accept invite: lookup party: %w", err)
+	}
+	var inviteID string
+	err = tx.QueryRow(ctx, `SELECT id FROM invites WHERE party_id = $1 AND user_id = $2 AND status = 'pending'`, partyID, actingUserID).Scan(&inviteID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("accept invite: no pending invite addressed to acting user")
+	}
+	if err != nil {
+		return fmt.Errorf("accept invite: lookup invite: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, partyID, actingUserID); err != nil {
+		return fmt.Errorf("accept invite: create membership: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE invites SET status = 'accepted' WHERE id = $1`, inviteID); err != nil {
+		return fmt.Errorf("accept invite: update invite: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit accept invite: %w", err)
+	}
+	return nil
+}
+
+// RejectInvite consumes only the acting user's pending invite and increments
+// their durable rejection tally without creating a membership.
+func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin reject invite: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentLeader int64
+	if err := tx.QueryRow(ctx, `SELECT leader_id FROM parties WHERE id = $1 FOR UPDATE`, partyID).Scan(&currentLeader); err != nil {
+		return fmt.Errorf("reject invite: lookup party: %w", err)
+	}
+	var inviteID string
+	err = tx.QueryRow(ctx, `SELECT id FROM invites WHERE party_id = $1 AND user_id = $2 AND status = 'pending'`, partyID, actingUserID).Scan(&inviteID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("reject invite: no pending invite addressed to acting user")
+	}
+	if err != nil {
+		return fmt.Errorf("reject invite: lookup invite: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE invites SET status = 'rejected' WHERE id = $1`, inviteID); err != nil {
+		return fmt.Errorf("reject invite: update invite: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO rejection_tallies (party_id, user_id, count) VALUES ($1, $2, 1)
+		ON CONFLICT (party_id, user_id) DO UPDATE SET count = rejection_tallies.count + 1`, partyID, actingUserID); err != nil {
+		return fmt.Errorf("reject invite: increment tally: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit reject invite: %w", err)
+	}
+	return nil
+}
+
+// InviteCandidates intersects live friend identities with registered users,
+// excluding self, current members, and pending invitees in the same SQL query.
+func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLeaderUserID int64, friendSteamID64s []string) ([]InviteCandidate, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id, u.persona_name FROM users u
+		WHERE u.steam_id_64 = ANY($3::text[])
+			AND u.id <> $2
+			AND EXISTS (SELECT 1 FROM parties p WHERE p.id = $1 AND p.leader_id = $2)
+			AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.party_id = $1 AND m.user_id = u.id)
+			AND NOT EXISTS (SELECT 1 FROM invites i WHERE i.party_id = $1 AND i.user_id = u.id AND i.status = 'pending')
+		ORDER BY u.id`, partyID, actingLeaderUserID, friendSteamID64s)
+	if err != nil {
+		return nil, fmt.Errorf("invite candidates: %w", err)
+	}
+	defer rows.Close()
+	candidates := make([]InviteCandidate, 0)
+	for rows.Next() {
+		var candidate InviteCandidate
+		if err := rows.Scan(&candidate.UserID, &candidate.Name); err != nil {
+			return nil, fmt.Errorf("invite candidates: scan: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("invite candidates: rows: %w", err)
+	}
+	return candidates, nil
 }
 
 func newSessionToken() (string, error) {

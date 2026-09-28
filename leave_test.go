@@ -10,24 +10,45 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"gather-your-party/internal/db"
 )
 
 const testPartyID = "61daf402-9c06-4c3b-923f-5f7dfd4369c7"
 
 type leaveStore struct {
 	fakeSessionStore
-	identity       string
-	found          bool
-	resolveErr     error
-	leaveErr       error
-	partyID        string
-	actingID       int64
-	leaveCalls     int
-	stepDownErr    error
-	stepDownCall   int
-	stepDownParty  string
-	stepDownActing int64
-	stepDownTarget int64
+	identity           string
+	found              bool
+	resolveErr         error
+	leaveErr           error
+	partyID            string
+	actingID           int64
+	leaveCalls         int
+	stepDownErr        error
+	stepDownCall       int
+	stepDownParty      string
+	stepDownActing     int64
+	stepDownTarget     int64
+	sendInviteCall     int
+	sendInviteParty    string
+	sendInviteActing   int64
+	sendInviteTarget   int64
+	sendInviteErr      error
+	acceptInviteCall   int
+	acceptInviteParty  string
+	acceptInviteActing int64
+	acceptInviteErr    error
+	rejectInviteCall   int
+	rejectInviteParty  string
+	rejectInviteActing int64
+	rejectInviteErr    error
+	candidateCall      int
+	candidateParty     string
+	candidateActing    int64
+	candidateFriends   []string
+	candidates         []db.InviteCandidate
+	candidateErr       error
 }
 
 func (s *leaveStore) ResolveSession(context.Context, string) (string, bool, error) {
@@ -49,6 +70,31 @@ func (s *leaveStore) StepDown(_ context.Context, partyID string, actingID int64,
 	s.stepDownCall++
 	s.stepDownParty, s.stepDownActing, s.stepDownTarget = partyID, actingID, targetID
 	return s.stepDownErr
+}
+
+func (s *leaveStore) SendInvite(_ context.Context, partyID string, actingID int64, targetID int64) error {
+	s.sendInviteCall++
+	s.sendInviteParty, s.sendInviteActing, s.sendInviteTarget = partyID, actingID, targetID
+	return s.sendInviteErr
+}
+
+func (s *leaveStore) AcceptInvite(_ context.Context, partyID string, actingID int64) error {
+	s.acceptInviteCall++
+	s.acceptInviteParty, s.acceptInviteActing = partyID, actingID
+	return s.acceptInviteErr
+}
+
+func (s *leaveStore) RejectInvite(_ context.Context, partyID string, actingID int64) error {
+	s.rejectInviteCall++
+	s.rejectInviteParty, s.rejectInviteActing = partyID, actingID
+	return s.rejectInviteErr
+}
+
+func (s *leaveStore) InviteCandidates(_ context.Context, partyID string, actingID int64, friends []string) ([]db.InviteCandidate, error) {
+	s.candidateCall++
+	s.candidateParty, s.candidateActing = partyID, actingID
+	s.candidateFriends = append([]string(nil), friends...)
+	return s.candidates, s.candidateErr
 }
 
 func leaveRequest(method, path, body string, authenticated bool) *http.Request {
@@ -219,6 +265,121 @@ func TestStepDownRejectsWithoutHandoff(t *testing.T) {
 			app.routes().ServeHTTP(w, leaveRequest(tc.method, path, tc.body, tc.authenticated))
 			if w.Code != tc.want || store.stepDownCall != 0 {
 				t.Fatalf("status=%d want=%d, stepDownCalls=%d", w.Code, tc.want, store.stepDownCall)
+			}
+		})
+	}
+}
+
+// CLM-1/14: the real router and middleware supply the actor; form identity is ignored.
+func TestSendInviteRoutes(t *testing.T)   { testInviteRoute(t, "send") }
+func TestAcceptInviteRoutes(t *testing.T) { testInviteRoute(t, "accept") }
+func TestRejectInviteRoutes(t *testing.T) { testInviteRoute(t, "reject") }
+
+func testInviteRoute(t *testing.T, action string) {
+	t.Helper()
+	store := &leaveStore{found: true}
+	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+	path := "/parties/" + testPartyID + "/invites/" + action
+	for _, hx := range []bool{true, false} {
+		w := httptest.NewRecorder()
+		r := leaveRequest("POST", path, "target=7&user_id=999&steamID=forged", true)
+		if hx {
+			r.Header.Set("HX-Request", "true")
+		}
+		app.routes().ServeHTTP(w, r)
+		if hx {
+			if w.Code != http.StatusOK || w.Body.Len() != 0 {
+				t.Fatalf("HTMX status=%d body=%s", w.Code, w.Body.String())
+			}
+		} else if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+			t.Fatalf("non-HTMX status=%d location=%s", w.Code, w.Header().Get("Location"))
+		}
+	}
+	if store.identity != testSteamID {
+		t.Fatalf("resolved identity=%s", store.identity)
+	}
+	switch action {
+	case "send":
+		if store.sendInviteCall != 2 || store.sendInviteParty != testPartyID || store.sendInviteActing != 42 || store.sendInviteTarget != 7 || store.acceptInviteCall != 0 || store.rejectInviteCall != 0 {
+			t.Fatalf("unexpected send calls: %+v", store)
+		}
+	case "accept":
+		if store.acceptInviteCall != 2 || store.acceptInviteParty != testPartyID || store.acceptInviteActing != 42 || store.sendInviteCall != 0 || store.rejectInviteCall != 0 {
+			t.Fatalf("unexpected accept calls: %+v", store)
+		}
+	case "reject":
+		if store.rejectInviteCall != 2 || store.rejectInviteParty != testPartyID || store.rejectInviteActing != 42 || store.sendInviteCall != 0 || store.acceptInviteCall != 0 {
+			t.Fatalf("unexpected reject calls: %+v", store)
+		}
+	}
+}
+
+func TestInvitesRejectWithoutAction(t *testing.T) {
+	for _, action := range []string{"send", "accept", "reject"} {
+		t.Run(action, func(t *testing.T) {
+			for _, tc := range []struct {
+				name          string
+				method        string
+				body          string
+				authenticated bool
+				missingUser   bool
+				resolveErr    error
+				invalidParty  bool
+				want          int
+			}{
+				{name: "anonymous GET", method: "GET", want: 404},
+				{name: "anonymous POST", method: "POST", body: "target=7", want: 401},
+				{name: "forged identity", method: "POST", body: "target=7&steamID=" + testSteamID + "&user_id=42", want: 401},
+				{name: "unknown user", method: "POST", body: "target=7", authenticated: true, missingUser: true, want: 401},
+				{name: "lookup failure", method: "POST", body: "target=7", authenticated: true, resolveErr: errors.New("private database details"), want: 500},
+				{name: "invalid UUID", method: "POST", body: "target=7", authenticated: true, invalidParty: true, want: 400},
+				{name: "bad form", method: "POST", body: "target=%zz", authenticated: true, want: 400},
+				{name: "wrong method", method: "PUT", body: "target=7", authenticated: true, want: 405},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					store := &leaveStore{found: !tc.missingUser, resolveErr: tc.resolveErr}
+					app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+					party := testPartyID
+					if tc.invalidParty {
+						party = "not-a-uuid"
+					}
+					w := httptest.NewRecorder()
+					app.routes().ServeHTTP(w, leaveRequest(tc.method, "/parties/"+party+"/invites/"+action, tc.body, tc.authenticated))
+					if w.Code != tc.want || store.sendInviteCall+store.acceptInviteCall+store.rejectInviteCall != 0 || strings.Contains(w.Body.String(), "private") {
+						t.Fatalf("status=%d want=%d, store=%+v body=%s", w.Code, tc.want, store, w.Body.String())
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSendInviteRejectsInvalidTarget(t *testing.T) {
+	for _, tc := range []struct{ body, query string }{
+		{"", ""}, {"target=not-a-number", ""}, {"target=9223372036854775808", ""}, {"", "?target=7"},
+	} {
+		t.Run(tc.body+tc.query, func(t *testing.T) {
+			store := &leaveStore{found: true}
+			app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+			w := httptest.NewRecorder()
+			app.routes().ServeHTTP(w, leaveRequest("POST", "/parties/"+testPartyID+"/invites/send"+tc.query, tc.body, true))
+			if w.Code != http.StatusBadRequest || store.sendInviteCall != 0 {
+				t.Fatalf("status=%d calls=%d", w.Code, store.sendInviteCall)
+			}
+		})
+	}
+}
+
+func TestInviteStoreErrors(t *testing.T) {
+	for _, action := range []string{"send", "accept", "reject"} {
+		t.Run(action, func(t *testing.T) {
+			private := errors.New("private database details")
+			store := &leaveStore{found: true, sendInviteErr: private, acceptInviteErr: private, rejectInviteErr: private}
+			app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+			w := httptest.NewRecorder()
+			app.routes().ServeHTTP(w, leaveRequest("POST", "/parties/"+testPartyID+"/invites/"+action, "target=7", true))
+			if w.Code != http.StatusInternalServerError || store.sendInviteCall+store.acceptInviteCall+store.rejectInviteCall != 1 || strings.Contains(w.Body.String(), "private") {
+				t.Fatalf("failed invite: %d %s", w.Code, w.Body.String())
 			}
 		})
 	}

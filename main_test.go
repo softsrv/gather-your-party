@@ -12,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"gather-your-party/internal/db"
 	"gather-your-party/internal/template"
 
 	"github.com/softsrv/steamapi/steamapi"
 )
+
+var _ sessionStore = (*db.Store)(nil)
 
 const testSteamID = "76561197960287930"
 const testSessionToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -148,6 +151,22 @@ func (s *fakeSessionStore) LeaveParty(context.Context, string, int64) error {
 
 func (s *fakeSessionStore) StepDown(context.Context, string, int64, int64) error {
 	return errors.New("unexpected StepDown call")
+}
+
+func (s *fakeSessionStore) SendInvite(context.Context, string, int64, int64) error {
+	return errors.New("unexpected SendInvite call")
+}
+
+func (s *fakeSessionStore) AcceptInvite(context.Context, string, int64) error {
+	return errors.New("unexpected AcceptInvite call")
+}
+
+func (s *fakeSessionStore) RejectInvite(context.Context, string, int64) error {
+	return errors.New("unexpected RejectInvite call")
+}
+
+func (s *fakeSessionStore) InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error) {
+	return nil, errors.New("unexpected InviteCandidates call")
 }
 
 func TestCallbackRejectsInvalidAssertion(t *testing.T) {
