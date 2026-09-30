@@ -148,7 +148,7 @@ func inviteIntegrationStore(t *testing.T) (*db.Store, *pgxpool.Pool, context.Con
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -224,15 +224,12 @@ func TestInviteRoutesRealStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT status FROM invites WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&status); err != nil || status != "pending" {
 		t.Fatalf("status=%s err=%v", status, err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM rejection_tallies WHERE party_id=$1`, party).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("unauthorized tallies=%d err=%v", count, err)
-	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("unauthorized memberships=%d err=%v", count, err)
 	}
 	request("reject", targetCookie, fmt.Sprintf("user_id=%d", leader), 200)
-	if err := pool.QueryRow(ctx, `SELECT count FROM rejection_tallies WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("tally=%d err=%v", count, err)
+	if err := pool.QueryRow(ctx, `SELECT status FROM invites WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&status); err != nil || status != "rejected" {
+		t.Fatalf("status=%s err=%v", status, err)
 	}
 	request("send", leaderCookie, sendBody, 200)
 	request("accept", targetCookie, fmt.Sprintf("user_id=%d", leader), 200)
@@ -268,9 +265,9 @@ func (s partyDetailGuardBypass) IsMember(context.Context, string, int64) (bool, 
 func TestPartyDetailNonMemberGuardRealStore(t *testing.T) {
 	store, pool, ctx := inviteIntegrationStore(t)
 	profiles := []steamapi.Player{
-		{PersonaName: "Private leader", AvatarSmall: "https://example.com/private-leader.jpg"},
-		{PersonaName: "Private member", AvatarSmall: "https://example.com/private-member.jpg"},
-		{PersonaName: "Outsider", AvatarSmall: "https://example.com/outsider.jpg"},
+		{PersonaName: "Private leader", AvatarMedium: "https://example.com/private-leader.jpg"},
+		{PersonaName: "Private member", AvatarMedium: "https://example.com/private-member.jpg"},
+		{PersonaName: "Outsider", AvatarMedium: "https://example.com/outsider.jpg"},
 	}
 	ids := make([]int64, len(profiles))
 	for i, profile := range profiles {
@@ -317,7 +314,7 @@ func TestPartyDetailNonMemberGuardRealStore(t *testing.T) {
 	assertRoster := func(w *httptest.ResponseRecorder, present bool) {
 		t.Helper()
 		for _, profile := range profiles[:2] {
-			for _, value := range []string{profile.PersonaName, profile.AvatarSmall} {
+			for _, value := range []string{profile.PersonaName, profile.AvatarMedium} {
 				if strings.Contains(w.Body.String(), value) != present {
 					t.Errorf("roster value %q present=%t want=%t: %s", value, !present, present, w.Body.String())
 				}
@@ -337,7 +334,7 @@ func TestPartyDetailNonMemberGuardRealStore(t *testing.T) {
 	// Positive control: ordinary members, not just leaders, see the full roster.
 	allowed := request(store, cookieFor(ids[1]))
 	assertRoster(allowed, true)
-	if allowed.Code != http.StatusOK || strings.Contains(allowed.Body.String(), profiles[2].PersonaName) || strings.Contains(allowed.Body.String(), profiles[2].AvatarSmall) {
+	if allowed.Code != http.StatusOK || strings.Contains(allowed.Body.String(), profiles[2].PersonaName) || strings.Contains(allowed.Body.String(), profiles[2].AvatarMedium) {
 		t.Errorf("member response=%d %s", allowed.Code, allowed.Body.String())
 	}
 	bypassed := request(partyDetailGuardBypass{store}, outsiderCookie)

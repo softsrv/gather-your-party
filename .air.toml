@@ -1,0 +1,18 @@
+# Hot reload for `make dev`: rebuilds and restarts the server when Go or templ files change.
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # Regenerate templates and CSS (new templ classes need Tailwind) before each build.
+  cmd = "make -s templ tw && go build -o ./tmp/gather-your-party ."
+  entrypoint = ["./tmp/gather-your-party"]
+  include_ext = ["go", "templ"]
+  # Generated files change on every build; watching them would loop.
+  exclude_regex = ["_templ\\.go$", "_test\\.go$"]
+  exclude_dir = ["tmp", "node_modules", "static", "migrations", "tests", ".git"]
+  delay = 200
+  send_interrupt = true
+  kill_delay = "2s"
+
+[misc]
+  clean_on_exit = false

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/softsrv/steamapi/steamapi"
@@ -44,7 +46,7 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 	}
 	candidates := make([]component.InviteCandidate, 0, len(known))
 	for _, candidate := range known {
-		candidates = append(candidates, component.InviteCandidate{UserID: candidate.UserID, Name: candidate.Name})
+		candidates = append(candidates, component.InviteCandidate{UserID: candidate.UserID, Name: candidate.Name, AvatarURL: candidate.AvatarURL})
 	}
 	return candidates, nil
 }
@@ -63,47 +65,9 @@ func ServeStaticFiles(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, fullPath)
 }
 
-func Home(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-
-	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	fmt.Println("Created the service!")
-	steamIDValue := ctx.Context.Value(middleware.SteamID{})
-	if steamIDValue == nil {
-		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-
-	playerIdList := []string{steamIDValue.(string)}
-	deadline := time.Now().Add(5000 * time.Millisecond)
-	newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
-	defer cancelCtx()
-	players, err := SteamService.Players(newCtx, playerIdList)
-	if err != nil {
-		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	if len(players) == 0 {
-		if err := template.ErrorMessage("no player found").Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	if err := template.Home(players[0], "Gather Your Party", template.Main).Render(ctx, w); err != nil {
-		fmt.Printf("render error: %s\n", err)
-	}
-}
-
 func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Context.Value(middleware.SteamID{})
+	steamIDValue := ctx.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
 			fmt.Printf("render error: %s\n", err)
@@ -121,6 +85,8 @@ func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
+	// Most-played first; the library can run to hundreds of games.
+	sort.SliceStable(games, func(i, j int) bool { return games[i].PlaytimeForever > games[j].PlaytimeForever })
 	if err := template.GameList(games).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
@@ -128,7 +94,7 @@ func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Req
 
 func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Context.Value(middleware.SteamID{})
+	steamIDValue := ctx.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
 			fmt.Printf("render error: %s\n", err)
@@ -161,6 +127,7 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 		return
 	}
 
+	sortFriends(roster)
 	if err := template.FriendsList(roster).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
@@ -168,7 +135,7 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 
 func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Context.Value(middleware.SteamID{})
+	steamIDValue := ctx.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
 			fmt.Printf("render error: %s\n", err)
@@ -262,4 +229,25 @@ func noGamesMessages(ids []string, roster []steamapi.Player) []string {
 		messages = append(messages, fmt.Sprintf(noGamesMessageFormat, personaName))
 	}
 	return messages
+}
+
+// sortFriends lists friends who are in a game first, then online, then offline,
+// alphabetically within each group.
+func sortFriends(friends []steamapi.Player) {
+	rank := func(p steamapi.Player) int {
+		switch {
+		case p.GameExtraInfo != "":
+			return 0
+		case p.PersonaState != 0:
+			return 1
+		default:
+			return 2
+		}
+	}
+	sort.SliceStable(friends, func(i, j int) bool {
+		if ri, rj := rank(friends[i]), rank(friends[j]); ri != rj {
+			return ri < rj
+		}
+		return strings.ToLower(friends[i].PersonaName) < strings.ToLower(friends[j].PersonaName)
+	})
 }

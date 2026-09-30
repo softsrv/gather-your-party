@@ -95,6 +95,15 @@ func TestPersistence(t *testing.T) {
 	if !created.Equal(originalCreated) || updated.Before(originalCreated) {
 		t.Fatal("upsert did not preserve creation time and refresh update time")
 	}
+	// Pages read the profile refreshed at sign-in rather than calling Steam.
+	stored, found, err := store.UserProfile(ctx, verifiedID)
+	if err != nil || !found || stored.SteamID != verifiedID || stored.PersonaName != "Barney" ||
+		stored.AvatarSmall != profile.AvatarSmall || stored.AvatarMedium != profile.AvatarMedium || stored.AvatarFull != profile.AvatarFull {
+		t.Fatalf("stored profile=%+v found=%v err=%v", stored, found, err)
+	}
+	if _, found, err := store.UserProfile(ctx, "76561198999999999"); err != nil || found {
+		t.Fatalf("unknown profile found=%v err=%v", found, err)
+	}
 	var count int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("expected one user, got %d, error %v", count, err)

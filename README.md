@@ -4,7 +4,7 @@ Help your plan game nights with your friends.  Agree on a time, place, and game 
 
 ## Configuration and database setup
 
-Use Go 1.22.3. Provision an externally hosted Postgres database (for example,
+Use Go 1.27.1 (the version in `go.mod`; newer Go toolchains download it automatically). Provision an externally hosted Postgres database (for example,
 Neon, Supabase, or Amazon RDS) before first use. The application does not provision
 a database or run migrations automatically.
 
@@ -26,13 +26,18 @@ by your provider; the application passes this URL unchanged to pgxpool. Pool
 creation is lazy: it does not guarantee connectivity until a query is made.
 
 Before first use, export `DATABASE_URL` in your shell (`psql` does not load `.env`)
-and apply the migration **once**, from the repository root:
+and apply each migration in `migrations/` **once**, in order, from the repository root:
 
 ```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_init.sql
+for f in migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
 ```
 
-The migration creates users keyed by a unique SteamID64 and sessions with a
+On an existing database, apply only the migrations it hasn't run yet (for example,
+`migrations/0003_drop_rejection_tallies.sql`, which removes the old invite-rejection
+limit's table). The local `make dev` database applies them automatically when first
+created; run `make db-reset` to rebuild it with new migrations.
+
+The first migration creates users keyed by a unique SteamID64 and sessions with a
 user foreign key and expiry. `internal/db` exposes an upsert that requires a
 caller-verified SteamID64 and session creation using a random 256-bit token,
 expiring after seven days. The Steam OpenID callback validates the assertion
@@ -58,10 +63,19 @@ go test ./...
 gofmt -l .
 ```
 
-The database integration tests require a **disposable, empty** Postgres database.
-They apply the migration and drop its tables on cleanup; never point them at a
-shared or production database. The URL is passed unchanged to pgxpool, so a
-TLS-requiring database can be used to check the provider's TLS settings too.
+The database integration tests need Docker. Each test package starts its own
+throwaway `postgres:16-alpine` container on the first free port from 55432 up
+(checked before Docker binds it) and removes it when the tests finish:
+
+```sh
+make test-integration   # go test -tags=integration ./... -count=1
+```
+
+To test against an existing database instead, set `TEST_DATABASE_URL`; it must be
+a **disposable, empty** database, since the tests apply the migrations and drop
+their tables on cleanup. Never point it at a shared or production database. The
+URL is passed unchanged to pgxpool, so a TLS-requiring database can be used to
+check the provider's TLS settings too.
 
 ```sh
 TEST_DATABASE_URL='postgres://user:pass@host:5432/test_db?sslmode=require' \

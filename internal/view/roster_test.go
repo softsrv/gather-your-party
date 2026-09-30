@@ -151,7 +151,13 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 					select {
 					case <-playersStarted:
 					case <-r.Context().Done():
-						t.Error("hydration did not overlap games fetch")
+						// SharedGames cancels sibling fetches when one fails, so both cases can be
+						// ready at once and select picks randomly. Only fail if hydration never started.
+						select {
+						case <-playersStarted:
+						default:
+							t.Error("hydration did not overlap games fetch")
+						}
 						return nil, r.Context().Err()
 					}
 					if scenario == "games error" || scenario == "both errors" {

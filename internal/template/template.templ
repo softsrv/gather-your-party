@@ -2,7 +2,6 @@ package template
 
 import "gather-your-party/internal/component"
 
-import "fmt"
 import "github.com/softsrv/steamapi/steamapi"
 
 type PageState int
@@ -12,61 +11,110 @@ const (
 	Main
 )
 
-func getGameUrl(appID int, imageID string) string {
-	return fmt.Sprintf("http://media.steampowered.com/steamcommunity/public/images/apps/%d/%s.jpg", appID, imageID)
-}
-
 templ Base(title string) {
-	<html data-theme="dim">
+	<!DOCTYPE html>
+	<html lang="en" data-theme="tavern">
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<meta name="color-scheme" content="dark"/>
+			<link rel="icon" type="image/svg+xml" href="/static/svg/favicon.svg"/>
+			<link rel="preconnect" href="https://fonts.googleapis.com"/>
+			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+			<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Inter:wght@400..700&display=swap"/>
 			<script src="/static/script/htmx.min.js"></script>
 			<link rel="stylesheet" href="/static/css/output.css"/>
 			<title>{ title }</title>
 		</head>
-		<body>
-			<main class="p-6 grid gap-4">
-				{ children... }
-			</main>
+		<body class="min-h-screen">
+			{ children... }
 		</body>
 	</html>
 }
 
-templ Home(player steamapi.Player, title string, pageName PageState) {
+// Page is the shared chrome for full pages: navigation, content column, footer.
+templ Page(title string, nav component.NavState) {
 	@Base(title) {
-		@component.Navbar(player, "")
+		@component.Navbar(nav)
+		<main class="mx-auto grid max-w-6xl gap-8 px-4 py-8 sm:px-6 sm:py-10">
+			{ children... }
+		</main>
+		<footer class="mx-auto max-w-6xl px-4 pb-10 pt-4 text-xs text-base-content/40 sm:px-6">
+			Gather Your Party · Not affiliated with Valve. Steam data comes from the Steam Web API.
+		</footer>
+	}
+}
+
+templ Home(player steamapi.Player, title string, pageName PageState) {
+	@Page(title, component.NavState{Player: player, SignedIn: pageName == Main, Active: "home"}) {
 		if pageName == Signin {
 			@component.Signin()
 		} else if pageName == Main {
-			@component.Main()
+			@component.Dashboard(player)
 		} else {
 			@component.TextAndTitle("thank you", "welcome to the site")
 		}
 	}
 }
 
-templ PartiesPage(parties []component.UserParty, invites []component.UserPendingInvite) {
-	@Base("Parties") {
-		<h1 class="text-lg font-bold">Parties</h1>
-		@component.PartiesTabs(parties, invites)
-		@component.CreatePartyForm()
+templ ErrorPage(title string, msg string) {
+	@Page(title, component.NavState{SignedIn: true}) {
+		@component.PageHeader("", "Something went wrong", "We couldn't load this page from Steam. Try again in a moment.")
+		@component.ErrorMessage(msg)
 	}
 }
 
-templ PartyDetail(partyID string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate) {
-	@Base("Party details") {
-		@component.PartyRoster(members)
-		if isLeader {
-			@component.InvitePicker(partyID, inviteCandidates)
-			@component.StepDownControl(partyID, stepDownCandidates)
-		}
+templ PartiesPage(player steamapi.Player, parties []component.UserParty, invites []component.UserPendingInvite) {
+	@Page("Parties", component.NavState{Player: player, SignedIn: true, Active: "parties"}) {
+		@component.PageHeader("Your parties", "Parties", "The groups you game with. Open a party to see who's in it and invite friends.")
+		<div class="grid items-start gap-6 lg:grid-cols-[1fr_22rem]">
+			@component.PartiesTabs(parties, invites)
+			@component.CreatePartyForm()
+		</div>
 	}
 }
 
-templ LeaveParty(partyID string) {
-	@Base("Leave party") {
-		@component.LeaveConfirmation(partyID)
+templ PartyDetail(player steamapi.Player, partyID string, partyName string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate) {
+	@Page("Party details", component.NavState{Player: player, SignedIn: true, Active: "parties"}) {
+		<div class="space-y-4">
+			<a href="/parties" class="btn btn-ghost btn-sm -ml-3 gap-2 text-base-content/60">
+				@component.Icon("arrow-left", "h-4 w-4")
+				All parties
+			</a>
+			<div class="flex flex-wrap items-center gap-3">
+				<h1 class="text-3xl font-extrabold sm:text-4xl">
+					if partyName != "" {
+						{ partyName }
+					} else {
+						Your party
+					}
+				</h1>
+				if isLeader {
+					<span class="badge badge-primary gap-1 py-3">
+						@component.Icon("crown", "h-3.5 w-3.5")
+						You lead this party
+					</span>
+				}
+			</div>
+		</div>
+		<div class="grid items-start gap-6 lg:grid-cols-[1fr_22rem]">
+			@component.PartyRoster(members)
+			<div class="grid gap-6">
+				if isLeader {
+					@component.InvitePicker(partyID, inviteCandidates)
+					@component.StepDownControl(partyID, stepDownCandidates)
+				}
+				@component.LeavePartyLink(partyID)
+			</div>
+		</div>
+	}
+}
+
+templ LeaveParty(player steamapi.Player, partyID string) {
+	@Page("Leave party", component.NavState{Player: player, SignedIn: true, Active: "parties"}) {
+		<div class="py-6 sm:py-12">
+			@component.LeaveConfirmation(partyID)
+		</div>
 	}
 }
 
@@ -79,38 +127,13 @@ templ ErrorMessages(msgs []string) {
 }
 
 templ GameList(games []steamapi.Game) {
-	<ul>
-		for _, item := range games {
-			<li><img src={ getGameUrl(item.AppID, item.ImgIconURL) }/>{ item.Name }</li>
-		}
-	</ul>
+	@component.Library(games)
 }
 
 templ SharedGamesList(games []steamapi.Game) {
-	@GameList(games)
+	@component.SharedGames(games)
 }
 
 templ FriendsList(friends []steamapi.Player) {
-	<form id="friends-list-form">
-		<ul>
-			for _, item := range friends {
-				<li>
-					<label class="flex items-center gap-2">
-						<input type="checkbox" name="friendID" value={ item.SteamID }/>
-						<img src={ item.AvatarSmall }/>
-						<span>{ item.PersonaName }</span>
-					</label>
-				</li>
-			}
-		</ul>
-		<button type="button" hx-post="/frag/shared-games" hx-target="#shared-games-results" hx-include="#friends-list-form" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3 rounded-full tracking-wide font-semibold shadow-lg cursor-pointer transition ease-in duration-200">
-			Show Shared Games
-		</button>
-	</form>
-	<div id="shared-games-results"></div>
-}
-
-templ Landing(isLoggedIn bool) {
-	@Base("Gather Your Party - Welcome!") {
-	}
+	@component.FriendPicker(friends)
 }

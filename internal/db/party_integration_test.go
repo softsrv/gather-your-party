@@ -50,7 +50,7 @@ func partyTestStore(t *testing.T) (*Store, *pgxpool.Pool, context.Context) {
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"../../migrations/0001_init.sql", "../../migrations/0002_parties.sql"} {
+	for _, path := range []string{"../../migrations/0001_init.sql", "../../migrations/0002_parties.sql", "../../migrations/0003_drop_rejection_tallies.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -71,7 +71,7 @@ func partyTestUser(t *testing.T, store *Store, ctx context.Context, steamID stri
 	return id
 }
 
-// Party detail CLM-4: real joins, party filtering, small avatars and stable seniority.
+// Party detail CLM-4: real joins, party filtering, medium avatars and stable seniority.
 func TestPartyMembersProfilesAndOrder(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
 	members := make([]PartyMember, 4)
@@ -81,13 +81,13 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 		profile := steamapi.Player{
 			PersonaName:  fmt.Sprintf("Roster member %d", i),
 			AvatarSmall:  fmt.Sprintf("https://example.com/small-%d.jpg", i),
-			AvatarMedium: "https://example.com/medium.jpg",
+			AvatarMedium: fmt.Sprintf("https://example.com/medium-%d.jpg", i),
 			AvatarFull:   "https://example.com/full.jpg",
 		}
 		if _, err := store.UpsertUser(ctx, steamID, profile); err != nil {
 			t.Fatal(err)
 		}
-		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarSmall}
+		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium}
 	}
 	party, err := store.CreateParty(ctx, members[0].UserID, "Roster")
 	if err != nil {
@@ -319,7 +319,7 @@ func TestLeavePartyLastMemberDeletesParty(t *testing.T) {
 }
 
 // [CLM-3] Deleting an emptied party through the leave path cascades: no
-// orphaned memberships, invites, or rejection tallies remain for it.
+// orphaned memberships or invites remain for it.
 func TestLeavePartyCascadeLeavesNoOrphans(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
 	leader := partyTestUser(t, store, ctx, "76561198000000093")
@@ -331,21 +331,15 @@ func TestLeavePartyCascadeLeavesNoOrphans(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id) VALUES ($1, $2, $3)`, party, invitee, leader); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO rejection_tallies (party_id, user_id, count) VALUES ($1, $2, $3)`, party, invitee, 1); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.LeaveParty(ctx, party, leader); err != nil {
 		t.Fatal(err)
 	}
-	var membershipCount, inviteCount, tallyCount int
+	var membershipCount, inviteCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, party).Scan(&membershipCount); err != nil || membershipCount != 0 {
 		t.Fatalf("orphaned memberships = %d, err=%v", membershipCount, err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM invites WHERE party_id = $1`, party).Scan(&inviteCount); err != nil || inviteCount != 0 {
 		t.Fatalf("orphaned invites = %d, err=%v", inviteCount, err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM rejection_tallies WHERE party_id = $1`, party).Scan(&tallyCount); err != nil || tallyCount != 0 {
-		t.Fatalf("orphaned rejection_tallies = %d, err=%v", tallyCount, err)
 	}
 }
 
@@ -647,42 +641,6 @@ func TestSendInviteConcurrentDuplicate(t *testing.T) {
 	}
 }
 
-// Invite CLM-8/15: the durable tally is consulted before any insert, at and above 3.
-func TestSendInviteRejectionBoundary(t *testing.T) {
-	for _, strikes := range []int{0, 2, 3, 4} {
-		t.Run(fmt.Sprint(strikes), func(t *testing.T) {
-			store, pool, ctx := partyTestStore(t)
-			leader := partyTestUser(t, store, ctx, "76561198000000101")
-			target := partyTestUser(t, store, ctx, "76561198000000102")
-			other := partyTestUser(t, store, ctx, "76561198000000103")
-			party, err := store.CreateParty(ctx, leader, "Strike boundary")
-			if err != nil {
-				t.Fatal(err)
-			}
-			otherParty, err := store.CreateParty(ctx, leader, "Unrelated tally")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := pool.Exec(ctx, `INSERT INTO rejection_tallies (party_id, user_id, count) VALUES ($1,$2,$3), ($1,$4,9), ($5,$2,9)`, party, target, strikes, other, otherParty); err != nil {
-				t.Fatal(err)
-			}
-			err = store.SendInvite(ctx, party, leader, target)
-			want := 1
-			if strikes >= 3 {
-				want = 0
-			}
-			if (err != nil) != (strikes >= 3) {
-				t.Fatalf("strikes=%d err=%v", strikes, err)
-			}
-			assertInviteCount(t, pool, ctx, party, target, want)
-			var got int
-			if err := pool.QueryRow(ctx, `SELECT count FROM rejection_tallies WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&got); err != nil || got != strikes {
-				t.Fatalf("tally=%d err=%v", got, err)
-			}
-		})
-	}
-}
-
 // Invite CLM-9: accepting consumes the invitation and creates a timestamped membership.
 func TestAcceptInviteMembership(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
@@ -708,8 +666,9 @@ func TestAcceptInviteMembership(t *testing.T) {
 	}
 }
 
-// Invite CLM-10: rejection creates then increments the tally, without membership.
-func TestRejectInviteTallyCycles(t *testing.T) {
+// Invite CLM-10: rejecting consumes the invite without a membership, and the
+// leader can invite again any number of times.
+func TestRejectInviteThenReinviteCycles(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
 	leader := partyTestUser(t, store, ctx, "76561198000000101")
 	target := partyTestUser(t, store, ctx, "76561198000000102")
@@ -717,7 +676,7 @@ func TestRejectInviteTallyCycles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for cycle := 1; cycle <= 2; cycle++ {
+	for cycle := 1; cycle <= 5; cycle++ {
 		if err := store.SendInvite(ctx, party, leader, target); err != nil {
 			t.Fatal(err)
 		}
@@ -727,10 +686,7 @@ func TestRejectInviteTallyCycles(t *testing.T) {
 		if err := store.RejectInvite(ctx, party, target); err == nil {
 			t.Fatal("consumed invite rejected twice")
 		}
-		var count, members, pending, rejected int
-		if err := pool.QueryRow(ctx, `SELECT count FROM rejection_tallies WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&count); err != nil || count != cycle {
-			t.Fatalf("tally=%d want=%d err=%v", count, cycle, err)
-		}
+		var members, pending, rejected int
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&members); err != nil || members != 0 {
 			t.Fatalf("members=%d err=%v", members, err)
 		}
@@ -740,7 +696,7 @@ func TestRejectInviteTallyCycles(t *testing.T) {
 	}
 }
 
-// Invite CLM-11: neither reply can consume another user's invitation or alter tallies.
+// Invite CLM-11: neither reply can consume another user's invitation.
 func TestInviteRepliesRejectWrongUser(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
 	leader := partyTestUser(t, store, ctx, "76561198000000101")
@@ -753,9 +709,6 @@ func TestInviteRepliesRejectWrongUser(t *testing.T) {
 	if err := store.SendInvite(ctx, party, leader, target); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO rejection_tallies (party_id,user_id,count) VALUES ($1,$2,1)`, party, target); err != nil {
-		t.Fatal(err)
-	}
 	for _, reply := range []struct {
 		name string
 		op   func(context.Context, string, int64) error
@@ -765,12 +718,9 @@ func TestInviteRepliesRejectWrongUser(t *testing.T) {
 				t.Fatal("wrong target permitted")
 			}
 			assertInviteStatus(t, pool, ctx, party, target, "pending")
-			var members, tallies, total int
+			var members int
 			if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id=$1 AND user_id IN ($2,$3)`, party, target, stranger).Scan(&members); err != nil || members != 0 {
 				t.Fatalf("members=%d err=%v", members, err)
-			}
-			if err := pool.QueryRow(ctx, `SELECT count(*), sum(count) FROM rejection_tallies WHERE party_id=$1`, party).Scan(&tallies, &total); err != nil || tallies != 1 || total != 1 {
-				t.Fatalf("tallies=%d total=%d err=%v", tallies, total, err)
 			}
 		})
 	}
@@ -817,12 +767,15 @@ func TestInviteCandidatesIntersectionAndExclusions(t *testing.T) {
 	if err := store.SendInvite(ctx, other, nonfriend, eligible); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET avatar_medium = 'https://example.com/eligible.jpg' WHERE id = $1`, eligible); err != nil {
+		t.Fatal(err)
+	}
 	friends := []string{steamIDs[0], steamIDs[1], steamIDs[2], steamIDs[3], steamIDs[5], "76561198999999999", steamIDs[3]}
 	got, err := store.InviteCandidates(ctx, party, leader, friends)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != (InviteCandidate{UserID: eligible, Name: "Party member"}) || got[1] != (InviteCandidate{UserID: rejected, Name: "Party member"}) {
+	if len(got) != 2 || got[0] != (InviteCandidate{UserID: eligible, Name: "Party member", AvatarURL: "https://example.com/eligible.jpg"}) || got[1] != (InviteCandidate{UserID: rejected, Name: "Party member"}) {
 		t.Fatalf("candidates=%+v", got)
 	}
 	if got, err := store.InviteCandidates(ctx, party, leader, nil); err != nil || len(got) != 0 {
@@ -849,41 +802,28 @@ func assertInviteStatus(t *testing.T, pool *pgxpool.Pool, ctx context.Context, p
 	}
 }
 
-func TestInviteRepliesRollBackOnSecondWriteFailure(t *testing.T) {
-	for _, action := range []string{"accept", "reject"} {
-		t.Run(action, func(t *testing.T) {
-			store, pool, ctx := partyTestStore(t)
-			leader := partyTestUser(t, store, ctx, "76561198000000101")
-			target := partyTestUser(t, store, ctx, "76561198000000102")
-			party, err := store.CreateParty(ctx, leader, "Atomic reply")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.SendInvite(ctx, party, leader, target); err != nil {
-				t.Fatal(err)
-			}
-			if action == "accept" {
-				if _, err := pool.Exec(ctx, `ALTER TABLE invites ADD CONSTRAINT reject_accept_test CHECK (status <> 'accepted')`); err != nil {
-					t.Fatal(err)
-				}
-				err = store.AcceptInvite(ctx, party, target)
-			} else {
-				if _, err := pool.Exec(ctx, `ALTER TABLE rejection_tallies ADD CONSTRAINT reject_tally_test CHECK (count < 1)`); err != nil {
-					t.Fatal(err)
-				}
-				err = store.RejectInvite(ctx, party, target)
-			}
-			if err == nil {
-				t.Fatal("injected second write failure must be returned")
-			}
-			assertInviteStatus(t, pool, ctx, party, target, "pending")
-			var members, tallies int
-			if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&members); err != nil || members != 0 {
-				t.Fatalf("partial membership=%d err=%v", members, err)
-			}
-			if err := pool.QueryRow(ctx, `SELECT count(*) FROM rejection_tallies WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&tallies); err != nil || tallies != 0 {
-				t.Fatalf("partial tally=%d err=%v", tallies, err)
-			}
-		})
+// Accepting writes the membership and the invite status atomically: if the
+// second write fails, neither is kept.
+func TestAcceptInviteRollsBackOnSecondWriteFailure(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	leader := partyTestUser(t, store, ctx, "76561198000000101")
+	target := partyTestUser(t, store, ctx, "76561198000000102")
+	party, err := store.CreateParty(ctx, leader, "Atomic reply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendInvite(ctx, party, leader, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE invites ADD CONSTRAINT reject_accept_test CHECK (status <> 'accepted')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcceptInvite(ctx, party, target); err == nil {
+		t.Fatal("injected second write failure must be returned")
+	}
+	assertInviteStatus(t, pool, ctx, party, target, "pending")
+	var members int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&members); err != nil || members != 0 {
+		t.Fatalf("partial membership=%d err=%v", members, err)
 	}
 }

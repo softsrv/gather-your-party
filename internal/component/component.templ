@@ -1,35 +1,175 @@
 package component
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/softsrv/steamapi/steamapi"
 )
 
-templ Navbar(player steamapi.Player, username string) {
-	<div class="navbar bg-base-100">
-		<div class="flex-1">
-			<a class="btn btn-ghost text-xl" href="/">Gather Your Party</a>
-		</div>
-		<div class="flex-none">
-			<ul class="menu menu-horizontal px-1">
-				if player.PersonaName != "" {
-					<li>
-						<details>
-							<summary>
-								<img src={ player.AvatarSmall }/> { player.PersonaName }
-							</summary>
-							<ul class="p-2 bg-base-100 rounded-t-none">
-								<li><a>profile</a></li>
-								<li><form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form></li>
-							</ul>
-						</details>
-					</li>
-				} else {
-					<li><a href="/auth/steam">Login</a></li>
-				}
-			</ul>
-		</div>
+// NavState describes the signed-in user for the shared page chrome. Pages that
+// don't fetch the Steam profile leave Player empty and show a generic avatar.
+type NavState struct {
+	Player   steamapi.Player
+	SignedIn bool
+	Active   string
+}
+
+func initial(name string) string {
+	for _, r := range strings.TrimSpace(name) {
+		return string(unicode.ToUpper(r))
+	}
+	return "?"
+}
+
+func navLinkClass(active bool) string {
+	if active {
+		return "btn btn-ghost btn-sm gap-2 bg-white/5 text-base-content"
+	}
+	return "btn btn-ghost btn-sm gap-2 font-medium text-base-content/70 hover:text-base-content"
+}
+
+templ Icon(name string, class string) {
+	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class={ class } aria-hidden="true">
+		switch name {
+			case "users":
+				<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+				<circle cx="9" cy="7" r="4"></circle>
+				<path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+				<path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+			case "home":
+				<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+				<path d="M9 22V12h6v10"></path>
+			case "plus":
+				<path d="M5 12h14"></path>
+				<path d="M12 5v14"></path>
+			case "arrow-left":
+				<path d="m12 19-7-7 7-7"></path>
+				<path d="M19 12H5"></path>
+			case "arrow-right":
+				<path d="M5 12h14"></path>
+				<path d="m12 5 7 7-7 7"></path>
+			case "crown":
+				<path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7z"></path>
+				<path d="M5 20h14"></path>
+			case "log-out":
+				<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+				<path d="m16 17 5-5-5-5"></path>
+				<path d="M21 12H9"></path>
+			case "gamepad":
+				<path d="M6 11h4"></path>
+				<path d="M8 9v4"></path>
+				<path d="M15 12h.01"></path>
+				<path d="M18 10h.01"></path>
+				<path d="M17.32 5H6.68a4 4 0 0 0-3.98 3.59C2.6 9.42 2 14.46 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.41-1.41A2 2 0 0 1 9.83 16h4.34a2 2 0 0 1 1.41.59L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.54-.6-6.58-.69-7.26A4 4 0 0 0 17.32 5z"></path>
+			case "search":
+				<circle cx="11" cy="11" r="8"></circle>
+				<path d="m21 21-4.3-4.3"></path>
+			case "mail":
+				<rect width="20" height="16" x="2" y="4" rx="2"></rect>
+				<path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path>
+			case "library":
+				<path d="m16 6 4 14"></path>
+				<path d="M12 6v14"></path>
+				<path d="M8 8v12"></path>
+				<path d="M4 4v16"></path>
+			case "user-plus":
+				<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+				<circle cx="9" cy="7" r="4"></circle>
+				<path d="M19 8v6"></path>
+				<path d="M22 11h-6"></path>
+			case "chevron-down":
+				<path d="m6 9 6 6 6-6"></path>
+			case "calendar":
+				<rect width="18" height="18" x="3" y="4" rx="2"></rect>
+				<path d="M16 2v4"></path>
+				<path d="M8 2v4"></path>
+				<path d="M3 10h18"></path>
+			case "alert":
+				<circle cx="12" cy="12" r="10"></circle>
+				<path d="M12 8v4"></path>
+				<path d="M12 16h.01"></path>
+		}
+	</svg>
+}
+
+// BrandMark is a d20-style die: the app's nod to "gather your party" RPG lore.
+templ BrandMark(class string) {
+	<svg viewBox="0 0 32 32" class={ class } aria-hidden="true">
+		<path d="M16 1.5 28.6 8.75v14.5L16 30.5 3.4 23.25V8.75z" fill="#f6b547"></path>
+		<path d="M16 7.5 23.5 20.5h-15z" fill="none" stroke="#1f1403" stroke-width="2" stroke-linejoin="round"></path>
+		<path d="M16 7.5 3.4 8.75M16 7.5l12.6 1.25M8.5 20.5l-5.1 2.75M23.5 20.5l5.1 2.75M8.5 20.5 16 30.5l7.5-10" fill="none" stroke="#1f1403" stroke-opacity=".45" stroke-width="1.4" stroke-linejoin="round"></path>
+	</svg>
+}
+
+templ Avatar(url string, name string, class string) {
+	if url != "" {
+		<img src={ url } alt="" class={ "shrink-0 rounded-full object-cover ring-1 ring-white/10", class }/>
+	} else {
+		<span class={ "avatar-fallback", class }>{ initial(name) }</span>
+	}
+}
+
+templ Navbar(nav NavState) {
+	<header class="sticky top-0 z-30 border-b border-white/5 bg-base-300/75 backdrop-blur-lg">
+		<nav class="mx-auto flex h-16 max-w-6xl items-center gap-2 px-4 sm:px-6" aria-label="Main">
+			<a href="/" class="mr-2 flex items-center gap-2.5 rounded-lg font-display text-lg font-bold tracking-tight">
+				@BrandMark("h-8 w-8 drop-shadow-[0_0_10px_rgba(246,181,71,0.35)]")
+				<span class="hidden sm:inline">Gather Your Party</span>
+			</a>
+			if nav.SignedIn {
+				<a href="/" class={ navLinkClass(nav.Active == "home") }>
+					@Icon("home", "h-4 w-4")
+					Home
+				</a>
+				<a href="/parties" class={ navLinkClass(nav.Active == "parties") }>
+					@Icon("users", "h-4 w-4")
+					Parties
+				</a>
+				<div class="user-menu dropdown dropdown-end ml-auto">
+					<div tabindex="0" role="button" class="btn btn-ghost btn-sm h-10 gap-2 px-2" aria-label="Account menu">
+						if nav.Player.PersonaName != "" {
+							@Avatar(nav.Player.AvatarMedium, nav.Player.PersonaName, "h-7 w-7 text-xs")
+							<span class="hidden max-w-[10rem] truncate font-medium sm:inline">{ nav.Player.PersonaName }</span>
+						} else {
+							<span class="avatar-fallback h-7 w-7">
+								@Icon("users", "h-3.5 w-3.5")
+							</span>
+						}
+						@Icon("chevron-down", "h-4 w-4 opacity-60")
+					</div>
+					<ul tabindex="0" class="menu dropdown-content z-40 mt-2 w-48 rounded-box border border-white/10 bg-base-100 p-2 shadow-2xl">
+						<li role="none"><form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form></li>
+					</ul>
+				</div>
+			} else {
+				<a href="/auth/steam" class="btn btn-primary btn-sm ml-auto">Sign in</a>
+			}
+		</nav>
+	</header>
+}
+
+templ PageHeader(eyebrow string, title string, subtitle string) {
+	<div class="space-y-2">
+		if eyebrow != "" {
+			<p class="eyebrow">{ eyebrow }</p>
+		}
+		<h1 class="text-3xl font-extrabold sm:text-4xl">{ title }</h1>
+		if subtitle != "" {
+			<p class="max-w-2xl text-base-content/65">{ subtitle }</p>
+		}
+	</div>
+}
+
+templ EmptyState(icon string, title string, text string) {
+	<div class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-white/10 px-6 py-10 text-center">
+		<span class="mb-1 grid h-12 w-12 place-items-center rounded-full bg-white/5 text-base-content/50">
+			@Icon(icon, "h-6 w-6")
+		</span>
+		<p class="font-display text-lg font-semibold">{ title }</p>
+		<p class="max-w-sm text-sm text-base-content/60">{ text }</p>
 	</div>
 }
 
@@ -45,50 +185,81 @@ type UserPendingInvite struct {
 
 templ PartiesTabs(parties []UserParty, invites []UserPendingInvite) {
 	<div role="tablist" class="tabs tabs-lifted">
-		<input type="radio" name="parties-tabs" id="current-parties-tab" role="tab" class="tab" aria-label="Current parties" aria-controls="current-parties-panel" checked/>
-		<section id="current-parties-panel" role="tabpanel" aria-labelledby="current-parties-tab" class="tab-content bg-base-100 p-6">
-			<ul>
-				for _, party := range parties {
-					<li><a href={ templ.SafeURL("/parties/" + party.PartyID) }>{ party.Name }</a></li>
-				}
-			</ul>
+		<input type="radio" name="parties-tabs" id="current-parties-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Current parties" aria-controls="current-parties-panel" checked/>
+		<section id="current-parties-panel" role="tabpanel" aria-labelledby="current-parties-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6">
+			if len(parties) == 0 {
+				@EmptyState("users", "No parties yet", "Start one with the form on this page, then invite the friends you play with.")
+			} else {
+				<ul class="party-list">
+					for _, party := range parties {
+						<li><a href={ templ.SafeURL("/parties/" + party.PartyID) }>{ party.Name }</a></li>
+					}
+				</ul>
+			}
 		</section>
-		<input type="radio" name="parties-tabs" id="invites-tab" role="tab" class="tab" aria-label="Invites" aria-controls="invites-panel"/>
-		<section id="invites-panel" role="tabpanel" aria-labelledby="invites-tab" class="tab-content bg-base-100 p-6">
-			<ul>
-				for _, invite := range invites {
-					<li>
-						<span>{ invite.Name }</span>
-						@AcceptInviteControl(invite.PartyID)
-						@RejectInviteControl(invite.PartyID)
-					</li>
-				}
-			</ul>
+		<input type="radio" name="parties-tabs" id="invites-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Invites" aria-controls="invites-panel"/>
+		<section id="invites-panel" role="tabpanel" aria-labelledby="invites-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6">
+			if len(invites) == 0 {
+				@EmptyState("mail", "No pending invites", "When a friend invites you to their party, it shows up here.")
+			} else {
+				<ul class="invite-list">
+					for _, invite := range invites {
+						<li>
+							<span>{ invite.Name }</span>
+							@AcceptInviteControl(invite.PartyID)
+							@RejectInviteControl(invite.PartyID)
+						</li>
+					}
+				</ul>
+			}
 		</section>
 	</div>
 }
 
 templ CreatePartyForm() {
-	<form method="post" action="/parties" hx-post="/parties">
-		<label for="party-name">Party name</label>
-		<input type="text" id="party-name" name="name" class="input input-bordered" required/>
-		<button type="submit" class="btn btn-primary">Create party</button>
-	</form>
+	<div class="panel create-party p-6">
+		<span class="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-primary/15 text-primary">
+			@Icon("plus", "h-5 w-5")
+		</span>
+		<h2 id="create-party-heading" class="text-xl font-bold">Start a new party</h2>
+		<p class="mb-5 mt-1 text-sm text-base-content/60">You'll lead it, so you can invite Steam friends and hand off leadership later.</p>
+		<form method="post" action="/parties" hx-post="/parties">
+			<label for="party-name">Party name</label>
+			<input type="text" id="party-name" name="name" class="input input-bordered w-full bg-base-200" placeholder="e.g. Friday Night Raid" autocomplete="off" required/>
+			<div class="mt-4 grid">
+				<button type="submit" class="btn btn-primary">Create party</button>
+			</div>
+		</form>
+	</div>
 }
 
 type PartyMember struct {
 	Name      string
 	AvatarURL string
+	IsLeader  bool
 }
 
 templ PartyRoster(members []PartyMember) {
-	<section aria-label="Party members">
-		<h1 class="text-lg font-bold">Party members</h1>
-		<ul>
+	<section class="panel p-6" aria-label="Party members">
+		<div class="mb-4 flex items-baseline justify-between gap-2">
+			<h2 class="text-xl font-bold">Members</h2>
+			<span class="text-sm text-base-content/50">{ strconv.Itoa(len(members)) } in party</span>
+		</div>
+		<ul class="grid gap-2 sm:grid-cols-2">
 			for _, member := range members {
-				<li class="flex items-center gap-2">
-					<img src={ member.AvatarURL }/>
-					<span>{ member.Name }</span>
+				<li class="flex items-center gap-3 rounded-xl border border-white/5 bg-base-200/70 p-3">
+					@Avatar(member.AvatarURL, member.Name, "h-11 w-11 text-base")
+					<div class="min-w-0">
+						<span>{ member.Name }</span>
+						if member.IsLeader {
+							<p class="flex items-center gap-1 text-xs font-medium text-primary">
+								@Icon("crown", "h-3.5 w-3.5")
+								Party leader
+							</p>
+						} else {
+							<p class="text-xs text-base-content/50">Member</p>
+						}
+					</div>
 				</li>
 			}
 		</ul>
@@ -96,29 +267,43 @@ templ PartyRoster(members []PartyMember) {
 }
 
 templ LeaveConfirmation(partyID string) {
-	<section id="leave-confirmation" aria-label="Leave party">
-		<p>Are you sure you want to leave this party?</p>
-		<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/leave") } hx-post={ "/parties/" + partyID + "/leave" } hx-target="#leave-confirmation" hx-swap="outerHTML">
-			<button type="submit" name="confirm" value="yes" class="btn btn-primary">Confirm</button>
-			<a href="/" class="btn" onclick="this.closest('section').remove(); return false;">Cancel</a>
+	<section id="leave-confirmation" aria-label="Leave party" class="panel mx-auto max-w-lg p-8 text-center">
+		<span class="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-full bg-error/15 text-error">
+			@Icon("log-out", "h-6 w-6")
+		</span>
+		<h1 class="text-2xl font-bold">Leave this party?</h1>
+		<p class="mt-2 text-base-content/80">Are you sure you want to leave this party?</p>
+		<p class="mt-2 text-sm text-base-content/55">You'll need a new invite to rejoin. If you lead the party, the longest-standing member takes over.</p>
+		<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/leave") } hx-post={ "/parties/" + partyID + "/leave" } hx-target="#leave-confirmation" hx-swap="none" hx-on::after-request="if (event.detail.successful) window.location.href = '/parties'" class="mt-7 flex flex-col-reverse justify-center gap-3 sm:flex-row">
+			<a href={ templ.SafeURL("/parties/" + partyID) } class="btn btn-ghost">Cancel</a>
+			<button type="submit" name="confirm" value="yes" class="btn btn-error">Confirm</button>
 		</form>
 	</section>
 }
 
 type StepDownCandidate struct {
-	UserID int64
-	Name   string
+	UserID    int64
+	Name      string
+	AvatarURL string
 }
 
 templ StepDownControl(partyID string, candidates []StepDownCandidate) {
-	<section id="step-down-control" aria-label="Step down as leader">
+	<section id="step-down-control" aria-label="Step down as leader" class="panel p-6">
+		<h2 class="flex items-center gap-2 text-lg font-bold">
+			@Icon("crown", "h-5 w-5 text-primary")
+			Leadership
+		</h2>
 		if len(candidates) == 0 {
-			<p class="text-sm opacity-70">You are the only member of this party, so leadership cannot be handed off.</p>
+			<p class="mt-2 text-sm text-base-content/60">You are the only member of this party, so leadership cannot be handed off.</p>
 		} else {
-			<p>Hand off leadership to another member:</p>
-			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/step-down") } hx-post={ "/parties/" + partyID + "/step-down" } hx-target="#step-down-control" hx-swap="outerHTML">
+			<p class="mb-4 mt-1 text-sm text-base-content/60">Hand off leadership to another member.</p>
+			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/step-down") } hx-post={ "/parties/" + partyID + "/step-down" } hx-swap="none" hx-confirm="Hand off leadership? You'll no longer be able to invite friends or manage this party." hx-on::after-request="if (event.detail.successful) window.location.reload()" class="grid gap-2">
 				for _, candidate := range candidates {
-					<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-primary">{ candidate.Name }</button>
+					<div class="flex items-center gap-3">
+						@Avatar(candidate.AvatarURL, candidate.Name, "h-8 w-8 text-xs")
+						<span class="min-w-0 flex-1 truncate text-sm font-medium">{ candidate.Name }</span>
+						<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-outline btn-primary btn-xs" aria-label={ "Make " + candidate.Name + " leader" }>Make leader</button>
+					</div>
 				}
 			</form>
 		}
@@ -126,53 +311,249 @@ templ StepDownControl(partyID string, candidates []StepDownCandidate) {
 }
 
 type InviteCandidate struct {
-	UserID int64
-	Name   string
+	UserID    int64
+	Name      string
+	AvatarURL string
 }
 
 templ InvitePicker(partyID string, candidates []InviteCandidate) {
-	<section aria-label="Invite friends">
+	<section aria-label="Invite friends" class="panel p-6">
+		<h2 class="flex items-center gap-2 text-lg font-bold">
+			@Icon("user-plus", "h-5 w-5 text-secondary")
+			Invite friends
+		</h2>
 		if len(candidates) == 0 {
-			<p class="text-sm opacity-70">No friends are available to invite.</p>
+			<p class="mt-2 text-sm text-base-content/60">No friends are available to invite. Steam friends show up here once they've signed in to Gather Your Party.</p>
 		} else {
-			<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/send") } hx-post={ "/parties/" + partyID + "/invites/send" } hx-target="closest section" hx-swap="outerHTML">
+			<p class="mb-4 mt-1 text-sm text-base-content/60">Steam friends who use Gather Your Party.</p>
+			<div class="grid gap-2">
 				for _, candidate := range candidates {
-					<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-primary">{ candidate.Name }</button>
+					<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/send") } hx-post={ "/parties/" + partyID + "/invites/send" } hx-swap="none" hx-on::after-request="if (event.detail.successful) this.classList.add('is-sent')" class="invite-row flex items-center gap-3">
+						@Avatar(candidate.AvatarURL, candidate.Name, "h-8 w-8 text-xs")
+						<span class="min-w-0 flex-1 truncate text-sm font-medium">{ candidate.Name }</span>
+						<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-secondary btn-xs" aria-label={ "Invite " + candidate.Name }>Invite</button>
+					</form>
 				}
-			</form>
+			</div>
 		}
 	</section>
 }
 
 templ AcceptInviteControl(partyID string) {
-	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/accept") } hx-post={ "/parties/" + partyID + "/invites/accept" } hx-target="this" hx-swap="outerHTML">
-		<button type="submit" class="btn btn-primary">Accept invite</button>
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/accept") } hx-post={ "/parties/" + partyID + "/invites/accept" } hx-swap="none" hx-on::after-request="if (event.detail.successful) window.location.reload()">
+		<button type="submit" class="btn btn-primary btn-sm">Join party</button>
 	</form>
 }
 
 templ RejectInviteControl(partyID string) {
-	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/reject") } hx-post={ "/parties/" + partyID + "/invites/reject" } hx-target="this" hx-swap="outerHTML">
-		<button type="submit" class="btn">Reject invite</button>
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/reject") } hx-post={ "/parties/" + partyID + "/invites/reject" } hx-target="closest li" hx-swap="outerHTML">
+		<button type="submit" class="btn btn-ghost btn-sm">Decline</button>
 	</form>
 }
 
-templ Banner() {
-	<header class="p-6 flex flex-col justify-between">
-		<img src="/static/svg/logo.svg" class="h-20 w-20"/>
-	</header>
+templ LeavePartyLink(partyID string) {
+	<section class="panel p-6">
+		<h2 class="text-lg font-bold">Done with this party?</h2>
+		<p class="mb-4 mt-1 text-sm text-base-content/60">You can leave at any time.</p>
+		<a href={ templ.SafeURL("/parties/" + partyID + "/leave") } class="btn btn-outline btn-error btn-sm gap-2">
+			@Icon("log-out", "h-4 w-4")
+			Leave party
+		</a>
+	</section>
 }
 
-templ Main() {
-	<div class="mb-4">
-		<div id="game-list">
-			<button hx-target="#game-list" hx-get="/frag/games" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3  rounded-full tracking-wide font-semibold  shadow-lg cursor-pointer transition ease-in duration-200">
-				Show Games
-			</button>
-			<button hx-target="#game-list" hx-get="/frag/friends" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3  rounded-full tracking-wide font-semibold  shadow-lg cursor-pointer transition ease-in duration-200">
-				Show Friends
+// Dashboard is the signed-in home: find games in common with friends, browse the library.
+templ Dashboard(player steamapi.Player) {
+	<div class="flex flex-wrap items-center gap-4 sm:gap-6">
+		@Avatar(player.AvatarFull, player.PersonaName, "h-14 w-14 text-2xl ring-2 ring-primary/40 sm:h-20 sm:w-20 sm:text-3xl")
+		<div class="min-w-0 flex-1">
+			<p class="eyebrow">Ready for game night?</p>
+			<h1 class="mt-1 break-words text-2xl font-extrabold sm:text-4xl">Welcome back, { player.PersonaName }</h1>
+		</div>
+		<a href="/parties" class="btn btn-primary w-full gap-2 sm:w-auto">
+			@Icon("users", "h-4 w-4")
+			Your parties
+		</a>
+	</div>
+	<section class="panel p-5 sm:p-7" aria-labelledby="find-games-heading">
+		<div class="mb-5 flex items-start gap-4">
+			<span class="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-accent/15 text-accent">
+				@Icon("gamepad", "h-5 w-5")
+			</span>
+			<div>
+				<h2 id="find-games-heading" class="text-xl font-bold">What can we all play?</h2>
+				<p class="text-sm text-base-content/60">Pick who's joining tonight and we'll find the games everyone already owns.</p>
+			</div>
+		</div>
+		<div hx-get="/frag/friends" hx-trigger="load" hx-swap="outerHTML">
+			<div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4" aria-busy="true" aria-label="Loading friends">
+				for i := 0; i < 8; i++ {
+					<div class="h-[60px] animate-pulse rounded-xl bg-base-200"></div>
+				}
+			</div>
+		</div>
+	</section>
+	<section class="panel p-5 sm:p-7" aria-labelledby="library-heading">
+		<div class="flex flex-wrap items-center gap-4">
+			<span class="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-secondary/15 text-secondary">
+				@Icon("library", "h-5 w-5")
+			</span>
+			<div class="flex-1">
+				<h2 id="library-heading" class="text-xl font-bold">Your library</h2>
+				<p class="text-sm text-base-content/60">Everything in your Steam account, most played first.</p>
+			</div>
+		</div>
+		<div id="game-list" class="mt-5">
+			<button hx-get="/frag/games" hx-target="#game-list" class="btn btn-outline gap-2">
+				Browse your library
+				<span class="htmx-indicator loading loading-spinner loading-sm"></span>
 			</button>
 		</div>
+	</section>
+}
+
+func personaStatus(p steamapi.Player) (string, string) {
+	switch {
+	case p.GameExtraInfo != "":
+		return "Playing " + p.GameExtraInfo, "bg-accent"
+	case p.PersonaState == 0:
+		return "Offline", "bg-base-content/25"
+	case p.PersonaState == 2:
+		return "Busy", "bg-error"
+	case p.PersonaState == 3 || p.PersonaState == 4:
+		return "Away", "bg-warning"
+	default:
+		return "Online", "bg-success"
+	}
+}
+
+templ SearchInput(placeholder string, items string) {
+	<label class="input input-bordered input-sm flex w-full items-center gap-2 bg-base-200 sm:w-64">
+		@Icon("search", "h-4 w-4 opacity-50")
+		<input type="search" class="grow" placeholder={ placeholder } data-items={ items } oninput="const q = this.value.trim().toLowerCase(); document.querySelectorAll(this.dataset.items).forEach(el => el.hidden = !el.dataset.name.includes(q))"/>
+	</label>
+}
+
+templ FriendPicker(friends []steamapi.Player) {
+	<div>
+		if len(friends) == 0 {
+			@EmptyState("users", "No friends to show", "Your Steam friends list is empty or private.")
+		} else {
+			<form id="friends-list-form" class="space-y-4" onchange="const n = this.querySelectorAll('input[name=friendID]:checked').length; this.querySelector('[data-count]').textContent = n === 0 ? 'Nobody selected yet' : n + (n === 1 ? ' friend' : ' friends') + ' selected'; this.querySelector('[data-submit]').disabled = n === 0">
+				<div class="flex flex-wrap items-center justify-between gap-3">
+					<p class="text-sm text-base-content/60">{ strconv.Itoa(len(friends)) } Steam friends</p>
+					@SearchInput("Search friends", "#friends-list-form li")
+				</div>
+				<ul class="grid max-h-[26rem] grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+					for _, item := range friends {
+						<li data-name={ strings.ToLower(item.PersonaName) }>
+							<label class="flex cursor-pointer items-center gap-3 rounded-xl border border-white/5 bg-base-200/70 p-2.5 transition hover:border-white/15 has-[:checked]:border-primary/70 has-[:checked]:bg-primary/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-primary">
+								<input type="checkbox" name="friendID" value={ item.SteamID } class="checkbox-primary checkbox checkbox-sm"/>
+								<img src={ item.AvatarSmall } alt="" class="h-9 w-9 shrink-0 rounded-full ring-1 ring-white/10"/>
+								<span class="min-w-0">
+									<span class="block truncate text-sm font-medium">{ item.PersonaName }</span>
+									<span class="flex items-center gap-1.5 text-xs text-base-content/55">
+										<span class={ "h-1.5 w-1.5 shrink-0 rounded-full", statusDot(item) }></span>
+										<span class="truncate">{ statusLabel(item) }</span>
+									</span>
+								</span>
+							</label>
+						</li>
+					}
+				</ul>
+				<div class="sticky bottom-3 z-10 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-base-100/95 p-3 shadow-2xl backdrop-blur">
+					<p class="text-sm text-base-content/70" data-count aria-live="polite">Nobody selected yet</p>
+					<button type="button" hx-post="/frag/shared-games" hx-target="#shared-games-results" hx-include="#friends-list-form" class="btn btn-primary w-full gap-2 sm:w-auto" data-submit disabled>
+						Find shared games
+						<span class="htmx-indicator loading loading-spinner loading-sm"></span>
+					</button>
+				</div>
+			</form>
+		}
+		<div id="shared-games-results" class="mt-6" aria-live="polite"></div>
 	</div>
+}
+
+func statusLabel(p steamapi.Player) string {
+	label, _ := personaStatus(p)
+	return label
+}
+
+func statusDot(p steamapi.Player) string {
+	_, class := personaStatus(p)
+	return class
+}
+
+func gameHeaderURL(appID int) string {
+	return fmt.Sprintf("https://cdn.cloudflare.steamstatic.com/steam/apps/%d/header.jpg", appID)
+}
+
+func gameIconURL(appID int, imageID string) string {
+	return fmt.Sprintf("https://media.steampowered.com/steamcommunity/public/images/apps/%d/%s.jpg", appID, imageID)
+}
+
+func playtime(minutes int) string {
+	switch {
+	case minutes == 0:
+		return "Not played yet"
+	case minutes < 60:
+		return strconv.Itoa(minutes) + " min played"
+	default:
+		return strconv.Itoa(minutes/60) + " h played"
+	}
+}
+
+templ GameGrid(id string, games []steamapi.Game, showPlaytime bool) {
+	<ul id={ id } class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+		for _, game := range games {
+			<li data-name={ strings.ToLower(game.Name) } class="group overflow-hidden rounded-xl border border-white/5 bg-base-200/70 transition hover:-translate-y-0.5 hover:border-white/15 hover:shadow-lg hover:shadow-black/30">
+				<div class="relative grid aspect-[460/215] place-items-center bg-gradient-to-br from-neutral to-base-300">
+					if game.ImgIconURL != "" {
+						<img src={ gameIconURL(game.AppID, game.ImgIconURL) } alt="" class="h-10 w-10 rounded-md opacity-80" loading="lazy"/>
+					}
+					<img src={ gameHeaderURL(game.AppID) } alt="" class="absolute inset-0 h-full w-full object-cover" loading="lazy" onerror="this.remove()"/>
+				</div>
+				<div class="p-2.5">
+					<p class="truncate text-sm font-medium" title={ game.Name }>{ game.Name }</p>
+					if showPlaytime {
+						<p class="text-xs text-base-content/50">{ playtime(game.PlaytimeForever) }</p>
+					}
+				</div>
+			</li>
+		}
+	</ul>
+}
+
+templ Library(games []steamapi.Game) {
+	if len(games) == 0 {
+		@EmptyState("library", "No games found", "Your library is empty or your Steam game details are private.")
+	} else {
+		<div class="space-y-4">
+			<div class="flex flex-wrap items-center justify-between gap-3">
+				<p class="text-sm text-base-content/60">{ strconv.Itoa(len(games)) } games</p>
+				@SearchInput("Search your library", "#library-grid li")
+			</div>
+			@GameGrid("library-grid", games, true)
+		</div>
+	}
+}
+
+templ SharedGames(games []steamapi.Game) {
+	if len(games) == 0 {
+		@EmptyState("gamepad", "No games in common", "Nobody in this group owns the same game yet. Try a different mix of friends.")
+	} else {
+		<div class="space-y-4">
+			<h3 class="flex items-center gap-2 text-lg font-bold">
+				<span class="badge badge-primary">{ strconv.Itoa(len(games)) }</span>
+				if len(games) == 1 {
+					game you can all play
+				} else {
+					games you can all play
+				}
+			</h3>
+			@GameGrid("shared-games-grid", games, false)
+		</div>
+	}
 }
 
 templ TextAndTitle(title string, text string) {
@@ -187,8 +568,9 @@ templ ErrorMessage(msg string) {
 }
 
 templ ErrorMessages(msgs []string) {
-	<div class="alert alert-error text-error-content" role="alert">
-		<ul>
+	<div class="alert border-error/30 bg-error/10 text-base-content" role="alert">
+		@Icon("alert", "h-5 w-5 shrink-0 text-error")
+		<ul class="space-y-1 text-sm">
 			for _, msg := range msgs {
 				<li>{ msg }</li>
 			}
@@ -197,31 +579,63 @@ templ ErrorMessages(msgs []string) {
 }
 
 templ Signin() {
-	<div class="min-h-screen sm:flex sm:flex-row mx-0 justify-center">
-		<div class="flex-col flex  self-center p-10 sm:max-w-5xl xl:max-w-2xl  z-10">
-			<div class="self-start hidden lg:flex flex-col  text-white">
-				<h1 class="mb-3 font-bold text-5xl">Gather Your Party </h1>
-				<p class="pr-3">
-					log in here
-				</p>
+	<section class="grid items-center gap-12 py-8 lg:grid-cols-[1.1fr_1fr] lg:py-16">
+		<div>
+			<p class="eyebrow">Game night, organized</p>
+			<h1 class="mt-3 text-5xl font-extrabold leading-[1.05] sm:text-6xl">
+				Gather your party.
+				<span class="block bg-gradient-to-r from-primary via-[#f59e8b] to-secondary bg-clip-text text-transparent">Skip the group chat.</span>
+			</h1>
+			<p class="mt-5 max-w-xl text-lg text-base-content/70">
+				Form a party with your Steam friends, then instantly see which games everyone already owns, so you spend game night playing instead of deciding.
+			</p>
+			<div class="mt-8 flex flex-wrap items-center gap-4">
+				<a href="/auth/steam" class="btn btn-primary btn-lg gap-3 shadow-lg shadow-primary/20">
+					@Icon("gamepad", "h-5 w-5")
+					Sign in through Steam
+				</a>
+				<p class="max-w-[16rem] text-xs text-base-content/50">We only read your public Steam profile, friends list, and game library.</p>
 			</div>
 		</div>
-		<div class="flex justify-center self-center  z-10">
-			<div class="p-12 bg-white mx-auto rounded-2xl w-100 ">
-				<div class="mb-4">
-					<h3 class="font-semibold text-2xl text-gray-800">Sign In </h3>
-					<p class="text-gray-500">Sign in with your Steam account to continue.</p>
+		<div class="relative mx-auto w-full max-w-md" aria-hidden="true">
+			<div class="absolute inset-0 rounded-[2rem] sm:-inset-6 bg-gradient-to-br from-primary/20 via-transparent to-secondary/25 blur-2xl"></div>
+			<div class="panel relative rotate-[-2deg] p-5">
+				<div class="flex items-center justify-between">
+					<p class="font-display text-lg font-bold">Friday Night Raid</p>
+					<span class="badge badge-primary badge-sm">4 members</span>
 				</div>
-				<div class="space-y-5">
-					<a href="/auth/steam" class="btn btn-active btn-primary w-full flex justify-center text-gray-100 p-3 rounded-full tracking-wide font-semibold shadow-lg cursor-pointer transition ease-in duration-200">Sign in through Steam</a>
+				<div class="mt-4 flex -space-x-2">
+					for i, name := range []string{"S", "A", "K", "L"} {
+						<span class={ "avatar-fallback h-10 w-10 ring-2 ring-base-100", []string{"bg-primary text-primary-content", "bg-secondary text-secondary-content", "bg-accent text-accent-content", "bg-neutral"}[i] }>{ name }</span>
+					}
 				</div>
-				<div class="pt-5 text-center text-gray-400 text-xs">
-					<span>
-						Copyright © 2021-2022
-						<a href="https://codepen.io/uidesignhub" rel="" target="_blank" title="Ajimon" class="text-green hover:text-green-500 ">AJI</a>
-					</span>
+				<div class="mt-5 rounded-xl bg-base-200/80 p-4">
+					<p class="text-xs font-semibold uppercase tracking-wider text-base-content/50">Everyone owns</p>
+					<div class="mt-3 flex flex-wrap gap-2">
+						for _, game := range []string{"Deep Rock Galactic", "Baldur's Gate 3", "Lethal Company", "Stardew Valley"} {
+							<span class="badge badge-outline gap-1 py-3">{ game }</span>
+						}
+					</div>
 				</div>
 			</div>
 		</div>
+	</section>
+	<section class="grid gap-4 pb-8 sm:grid-cols-3">
+		@Step("1", "users", "Form a party", "Create a group for the people you play with.")
+		@Step("2", "user-plus", "Invite friends", "Send invites straight from your Steam friends list.")
+		@Step("3", "gamepad", "Pick a game", "See the games everyone already owns and dive in.")
+	</section>
+}
+
+templ Step(number string, icon string, title string, text string) {
+	<div class="panel p-5">
+		<div class="flex items-center gap-3">
+			<span class="grid h-10 w-10 place-items-center rounded-xl bg-white/5 text-primary">
+				@Icon(icon, "h-5 w-5")
+			</span>
+			<span class="font-display text-sm font-bold text-base-content/40">Step { number }</span>
+		</div>
+		<h2 class="mt-4 text-lg font-bold">{ title }</h2>
+		<p class="mt-1 text-sm text-base-content/60">{ text }</p>
 	</div>
 }

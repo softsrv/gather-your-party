@@ -137,6 +137,10 @@ func (s *fakeSessionStore) DeleteSession(ctx context.Context, token string) erro
 	return s.deleteErr
 }
 
+func (s *fakeSessionStore) UserProfile(context.Context, string) (steamapi.Player, bool, error) {
+	return steamapi.Player{}, false, nil
+}
+
 func (s *fakeSessionStore) ResolveUserID(context.Context, string) (int64, bool, error) {
 	return 0, false, nil
 }

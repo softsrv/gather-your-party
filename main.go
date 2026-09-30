@@ -39,6 +39,7 @@ type sessionStore interface {
 	CreateSession(context.Context, int64) (string, error)
 	ResolveSession(context.Context, string) (string, bool, error)
 	DeleteSession(context.Context, string) error
+	UserProfile(context.Context, string) (steamapi.Player, bool, error)
 	ResolveUserID(context.Context, string) (int64, bool, error)
 	CreateParty(context.Context, int64, string) (string, error)
 	UserParties(context.Context, int64) ([]db.UserParty, error)
@@ -63,6 +64,16 @@ func main() {
 	config := appConfig{
 		SessionSecret: os.Getenv("SESSION_SECRET"),
 		AppBaseURL:    os.Getenv("APP_BASE_URL"),
+	}
+	// Without these, Steam rejects the OpenID return_to ("invalid return protocol")
+	// or the callback silently refuses every sign-in.
+	if config.SessionSecret == "" {
+		fmt.Fprintln(os.Stderr, "SESSION_SECRET is required")
+		os.Exit(1)
+	}
+	if base, err := url.Parse(config.AppBaseURL); err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+		fmt.Fprintln(os.Stderr, "APP_BASE_URL must be an absolute http(s) origin, e.g. http://localhost:8080")
+		os.Exit(1)
 	}
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -128,7 +139,7 @@ func (app *application) handleSteamCallback(w http.ResponseWriter, r *http.Reque
 		reject()
 		return
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 64*1024))
 	if err != nil || res.StatusCode != http.StatusOK || !assertionIsValid(string(body)) {
 		reject()
@@ -203,9 +214,50 @@ func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// handleHome shows Steam sign-in, or the dashboard greeting from the profile stored
+// at sign-in (no Steam call per page load).
+func (app *application) handleHome(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	steamID, _ := ctx.Value(middleware.SteamID{}).(string)
+	if steamID == "" {
+		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
+	player, found, err := app.store.UserProfile(r.Context(), steamID)
+	if err != nil || !found {
+		w.WriteHeader(http.StatusInternalServerError)
+		if err := template.ErrorPage("Gather Your Party", "unable to load your profile").Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
+	if err := template.Home(player, "Gather Your Party", template.Main).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
+// currentProfile loads the signed-in user's stored profile for the page chrome.
+// The avatar is decorative, so a failed lookup falls back to a generic one.
+func (app *application) currentProfile(ctx *middleware.CustomContext) steamapi.Player {
+	steamID, _ := ctx.Value(middleware.SteamID{}).(string)
+	if steamID == "" {
+		return steamapi.Player{}
+	}
+	player, _, err := app.store.UserProfile(ctx.Context, steamID)
+	if err != nil {
+		fmt.Printf("profile lookup error: %s\n", err)
+	}
+	return player
+}
+
 // sessionUserID accepts identity only from the verified session middleware.
 func (app *application) sessionUserID(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (int64, bool) {
-	steamID, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	steamID, ok := ctx.Value(middleware.SteamID{}).(string)
 	if !ok || steamID == "" {
 		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
 		return 0, false
@@ -245,7 +297,7 @@ func (app *application) handleParties(ctx *middleware.CustomContext, w http.Resp
 	for _, invite := range invites {
 		pending = append(pending, component.UserPendingInvite{PartyID: invite.PartyID, Name: invite.Name})
 	}
-	if err := template.PartiesPage(current, pending).Render(ctx, w); err != nil {
+	if err := template.PartiesPage(app.currentProfile(ctx), current, pending).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -275,7 +327,7 @@ func (app *application) handleCreateParty(ctx *middleware.CustomContext, w http.
 
 // leaveIdentity accepts identity only from the verified session middleware.
 func (app *application) leaveIdentity(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) (string, int64, bool) {
-	steamID, ok := ctx.Context.Value(middleware.SteamID{}).(string)
+	steamID, ok := ctx.Value(middleware.SteamID{}).(string)
 	if !ok || steamID == "" {
 		http.Error(w, "sign in to leave a party", http.StatusUnauthorized)
 		return "", 0, false
@@ -320,9 +372,18 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 	roster := make([]component.PartyMember, 0, len(members))
 	isLeader := false
 	for _, member := range members {
-		roster = append(roster, component.PartyMember{Name: member.Name, AvatarURL: member.AvatarURL})
+		roster = append(roster, component.PartyMember{Name: member.Name, AvatarURL: member.AvatarURL, IsLeader: member.IsLeader})
 		if member.UserID == userID && member.IsLeader {
 			isLeader = true
+		}
+	}
+	// The name is only a heading, so a lookup failure falls back to a generic title.
+	var partyName string
+	if parties, err := app.store.UserParties(r.Context(), userID); err == nil {
+		for _, party := range parties {
+			if party.PartyID == partyID {
+				partyName = party.Name
+			}
 		}
 	}
 	var inviteCandidates []component.InviteCandidate
@@ -332,7 +393,7 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 		deadline := time.Now().Add(5000 * time.Millisecond)
 		newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
 		defer cancelCtx()
-		steamID := ctx.Context.Value(middleware.SteamID{}).(string)
+		steamID := ctx.Value(middleware.SteamID{}).(string)
 		inviteCandidates, err = view.BuildInviteCandidates(newCtx, service, app.store, partyID, userID, steamID)
 		if err != nil {
 			http.Error(w, "unable to load invite candidates", http.StatusInternalServerError)
@@ -340,11 +401,11 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 		}
 		for _, member := range members {
 			if member.UserID != userID {
-				stepDownCandidates = append(stepDownCandidates, component.StepDownCandidate{UserID: member.UserID, Name: member.Name})
+				stepDownCandidates = append(stepDownCandidates, component.StepDownCandidate{UserID: member.UserID, Name: member.Name, AvatarURL: member.AvatarURL})
 			}
 		}
 	}
-	if err := template.PartyDetail(partyID, roster, isLeader, inviteCandidates, stepDownCandidates).Render(ctx, w); err != nil {
+	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -354,7 +415,7 @@ func (app *application) handleLeaveConfirmation(ctx *middleware.CustomContext, w
 	if !ok {
 		return
 	}
-	if err := template.LeaveParty(partyID).Render(ctx, w); err != nil {
+	if err := template.LeaveParty(app.currentProfile(ctx), partyID).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -374,7 +435,7 @@ func (app *application) handleLeaveParty(ctx *middleware.CustomContext, w http.R
 	}
 	if r.Header.Get("HX-Request") == "true" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// An empty successful response dismisses the confirmation via outerHTML.
+		// An empty successful response; the page then navigates back to /parties.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -503,7 +564,7 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("GET /favicon.ico", view.ServeFavicon)
 	mux.HandleFunc("GET /static/", view.ServeStaticFiles)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.Home, auth.LoadSteamId)
+		middleware.Chain(w, r, app.handleHome, auth.LoadSteamId)
 	})
 	mux.HandleFunc("GET /auth/steam", app.handleSteamLogin)
 	mux.HandleFunc("GET /auth/steam/callback", app.handleSteamCallback)

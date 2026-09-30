@@ -43,6 +43,23 @@ func (s *Store) UpsertUser(ctx context.Context, verifiedSteamID64 string, player
 	return id, nil
 }
 
+// UserProfile returns the stored Steam profile for a verified SteamID64. UpsertUser
+// refreshes it from Steam at every sign-in, so pages can show the user's name and
+// avatar without calling Steam on each request.
+func (s *Store) UserProfile(ctx context.Context, steamID64 string) (steamapi.Player, bool, error) {
+	player := steamapi.Player{SteamID: steamID64}
+	err := s.pool.QueryRow(ctx, `
+		SELECT persona_name, avatar_small, avatar_medium, avatar_full FROM users WHERE steam_id_64 = $1`, steamID64).
+		Scan(&player.PersonaName, &player.AvatarSmall, &player.AvatarMedium, &player.AvatarFull)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return steamapi.Player{}, false, nil
+	}
+	if err != nil {
+		return steamapi.Player{}, false, fmt.Errorf("user profile: %w", err)
+	}
+	return player, true, nil
+}
+
 // ResolveUserID turns a verified SteamID64 into its users.id. Because
 // steam_id_64 is UNIQUE, a known SteamID64 yields exactly one id; an unknown
 // one returns pgx.ErrNoRows-derived not-found (mirroring ResolveSession).
@@ -182,7 +199,7 @@ func (s *Store) UserPendingInvites(ctx context.Context, userID int64) ([]UserPen
 	return invites, nil
 }
 
-// PartyMember is a member's stored identity and small-avatar profile.
+// PartyMember is a member's stored identity and medium (64px) avatar.
 type PartyMember struct {
 	UserID    int64
 	Name      string
@@ -193,7 +210,7 @@ type PartyMember struct {
 // PartyMembers lists members in seniority order, with user ID breaking ties.
 func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT users.id, users.persona_name, users.avatar_small, users.id = parties.leader_id
+		SELECT users.id, users.persona_name, users.avatar_medium, users.id = parties.leader_id
 		FROM memberships JOIN users ON memberships.user_id = users.id
 		JOIN parties ON memberships.party_id = parties.id
 		WHERE memberships.party_id = $1
@@ -229,8 +246,7 @@ func (s *Store) IsMember(ctx context.Context, partyID string, userID int64) (boo
 // party's leader and other members remain, leadership passes automatically to
 // the earliest-joined remaining member (joined_at, then user_id, as a stable
 // tiebreaker). If the leave empties the party of all members, the party row
-// itself is deleted, cascading to its memberships, invites, and rejection
-// tallies.
+// itself is deleted, cascading to its memberships and invites.
 func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -331,12 +347,14 @@ func (s *Store) StepDown(ctx context.Context, partyID string, actingLeaderUserID
 
 // InviteCandidate is a known user eligible to appear in a party's invite picker.
 type InviteCandidate struct {
-	UserID int64
-	Name   string
+	UserID    int64
+	Name      string
+	AvatarURL string
 }
 
-// SendInvite records an invitation only for the current leader and below the
-// rejection limit. Locking the party serializes this with replies and leadership changes.
+// SendInvite records an invitation only for the current leader. A user can be
+// invited again after rejecting. Locking the party serializes this with replies
+// and leadership changes.
 func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -352,14 +370,6 @@ func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUser
 		return errors.New("send invite: acting user is not the party's leader")
 	}
 
-	var rejections int
-	err = tx.QueryRow(ctx, `SELECT count FROM rejection_tallies WHERE party_id = $1 AND user_id = $2`, partyID, targetUserID).Scan(&rejections)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("send invite: lookup rejection tally: %w", err)
-	}
-	if rejections >= 3 {
-		return errors.New("send invite: rejection limit reached")
-	}
 	if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'pending')`, partyID, targetUserID, actingLeaderUserID); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "invites_pending_party_user_idx" {
@@ -407,8 +417,8 @@ func (s *Store) AcceptInvite(ctx context.Context, partyID string, actingUserID i
 	return nil
 }
 
-// RejectInvite consumes only the acting user's pending invite and increments
-// their durable rejection tally without creating a membership.
+// RejectInvite consumes only the acting user's pending invite without creating
+// a membership.
 func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -431,10 +441,6 @@ func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID i
 	if _, err := tx.Exec(ctx, `UPDATE invites SET status = 'rejected' WHERE id = $1`, inviteID); err != nil {
 		return fmt.Errorf("reject invite: update invite: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO rejection_tallies (party_id, user_id, count) VALUES ($1, $2, 1)
-		ON CONFLICT (party_id, user_id) DO UPDATE SET count = rejection_tallies.count + 1`, partyID, actingUserID); err != nil {
-		return fmt.Errorf("reject invite: increment tally: %w", err)
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit reject invite: %w", err)
 	}
@@ -445,7 +451,7 @@ func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID i
 // excluding self, current members, and pending invitees in the same SQL query.
 func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLeaderUserID int64, friendSteamID64s []string) ([]InviteCandidate, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT u.id, u.persona_name FROM users u
+		SELECT u.id, u.persona_name, u.avatar_medium FROM users u
 		WHERE u.steam_id_64 = ANY($3::text[])
 			AND u.id <> $2
 			AND EXISTS (SELECT 1 FROM parties p WHERE p.id = $1 AND p.leader_id = $2)
@@ -459,7 +465,7 @@ func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLead
 	candidates := make([]InviteCandidate, 0)
 	for rows.Next() {
 		var candidate InviteCandidate
-		if err := rows.Scan(&candidate.UserID, &candidate.Name); err != nil {
+		if err := rows.Scan(&candidate.UserID, &candidate.Name, &candidate.AvatarURL); err != nil {
 			return nil, fmt.Errorf("invite candidates: scan: %w", err)
 		}
 		candidates = append(candidates, candidate)

@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"gather-your-party/internal/db"
+
+	"github.com/softsrv/steamapi/steamapi"
 )
 
 const testPartyID = "61daf402-9c06-4c3b-923f-5f7dfd4369c7"
@@ -89,6 +91,10 @@ func (s *leaveStore) UserPendingInvites(_ context.Context, userID int64) ([]db.U
 	return s.invites, s.invitesErr
 }
 
+func (s *leaveStore) UserProfile(_ context.Context, steamID string) (steamapi.Player, bool, error) {
+	return steamapi.Player{SteamID: steamID, PersonaName: "Nav tester"}, true, nil
+}
+
 func (s *leaveStore) ResolveUserID(_ context.Context, steamID string) (int64, bool, error) {
 	s.identity = steamID
 	return 42, s.found, s.resolveErr
@@ -159,7 +165,7 @@ func TestLeaveRoutes(t *testing.T) {
 		"Are you sure you want to leave this party?",
 		`hx-post="` + path + `"`, `hx-target="#leave-confirmation"`,
 		`name="confirm" value="yes"`, ">Confirm</button>", ">Cancel</a>",
-		`this.closest(&#39;section&#39;).remove(); return false;`,
+		`<a href="/parties/` + testPartyID + `" class="btn btn-ghost">Cancel</a>`,
 		`<script src="/static/script/htmx.min.js"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -416,5 +422,24 @@ func TestInviteStoreErrors(t *testing.T) {
 				t.Fatalf("failed invite: %d %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// The dashboard greets the user from the profile stored at sign-in; loading
+// the page must not call Steam.
+func TestSignedInHomeUsesStoredProfile(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected Steam request: %s", r.URL.Path)
+		return nil, errors.New("no network in tests")
+	})
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+	app := application{store: &leaveStore{found: true}, config: appConfig{SessionSecret: "leave-test-secret"}}
+	for _, path := range []string{"/", "/parties"} {
+		w := httptest.NewRecorder()
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, path, "", true))
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Nav tester") {
+			t.Fatalf("%s: status=%d, stored profile missing from page: %s", path, w.Code, w.Body.String())
+		}
 	}
 }

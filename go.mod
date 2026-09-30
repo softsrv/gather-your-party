@@ -1,6 +1,6 @@
 module gather-your-party
 
-go 1.22.3
+go 1.27.1
 
 require (
 	github.com/a-h/templ v0.2.680

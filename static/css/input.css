@@ -1,3 +1,78 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-base-300 font-sans text-base-content antialiased;
+    background-image:
+      radial-gradient(60rem 30rem at 85% -10%, rgb(167 139 250 / 0.14), transparent 60%),
+      radial-gradient(50rem 28rem at -10% 10%, rgb(246 181 71 / 0.10), transparent 60%);
+    background-attachment: fixed;
+  }
+  h1, h2, h3 {
+    @apply font-display tracking-tight;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-box border border-white/5 bg-base-100/80 shadow-xl shadow-black/20 backdrop-blur;
+  }
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-[0.18em] text-primary;
+  }
+  .avatar-fallback {
+    @apply grid shrink-0 place-items-center rounded-full bg-neutral font-display font-bold text-neutral-content;
+  }
+
+  /* Some party markup is pinned by tests (bare <li>, <a>, <span>, <label>), so it is styled from the parent. */
+  .party-list {
+    @apply grid gap-2;
+  }
+  .party-list > li > a {
+    @apply flex items-center gap-3 rounded-xl border border-white/5 bg-base-200/70 px-4 py-3.5 font-medium transition hover:border-primary/40 hover:bg-base-200;
+  }
+  .party-list > li > a::before {
+    content: "";
+    @apply h-2.5 w-2.5 shrink-0 rounded-full bg-primary shadow-[0_0_12px] shadow-primary/60;
+  }
+  .party-list > li > a::after {
+    content: "\203A";
+    @apply ml-auto text-xl leading-none text-base-content/40 transition;
+  }
+  .party-list > li > a:hover::after {
+    @apply translate-x-0.5 text-primary;
+  }
+  .invite-list {
+    @apply grid gap-2;
+  }
+  .invite-list > li {
+    @apply flex flex-wrap items-center gap-2 rounded-xl border border-white/5 bg-base-200/70 px-4 py-3;
+  }
+  .invite-list > li > span {
+    @apply mr-auto font-medium;
+  }
+  .create-party label {
+    @apply mb-1.5 block text-sm font-medium text-base-content/80;
+  }
+
+  /* Invite rows swap to a confirmation after a successful htmx post. */
+  .invite-row.is-sent button {
+    @apply hidden;
+  }
+  .invite-row.is-sent::after {
+    content: "Invite sent \2713";
+    @apply text-sm font-medium text-accent;
+  }
+}
+
+@layer components {
+  /* The logout form markup is pinned by tests; make the whole menu row the button. */
+  .user-menu li > form {
+    @apply p-0;
+  }
+  .user-menu li > form > button {
+    @apply block w-full rounded-btn px-4 py-2 text-left first-letter:uppercase;
+  }
+}

@@ -8,6 +8,8 @@ import (
 
 	"gather-your-party/internal/component"
 	"gather-your-party/internal/template"
+
+	"github.com/softsrv/steamapi/steamapi"
 )
 
 // CLM-2/6/7/9: render the full page through its public templ surface.
@@ -15,7 +17,7 @@ func TestPartiesPage(t *testing.T) {
 	var buf bytes.Buffer
 	parties := []component.UserParty{{PartyID: "party-a", Name: "A & friends"}, {PartyID: "party-b", Name: "B <crew>"}}
 	invites := []component.UserPendingInvite{{PartyID: "invite-a", Name: "Invite A"}, {PartyID: "invite-b", Name: "Invite B"}}
-	if err := template.PartiesPage(parties, invites).Render(context.Background(), &buf); err != nil {
+	if err := template.PartiesPage(steamapi.Player{}, parties, invites).Render(context.Background(), &buf); err != nil {
 		t.Fatal(err)
 	}
 	body := buf.String()
@@ -69,10 +71,12 @@ func TestPartiesPage(t *testing.T) {
 
 func TestPartiesPageEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	if err := template.PartiesPage(nil, nil).Render(context.Background(), &buf); err != nil {
+	if err := template.PartiesPage(steamapi.Player{}, nil, nil).Render(context.Background(), &buf); err != nil {
 		t.Fatal(err)
 	}
+	// Only check the page content; the shared navigation has its own logout form and menu item.
 	body := buf.String()
+	body = body[strings.Index(body, "</header>"):]
 	if strings.Count(body, `role="tabpanel"`) != 2 || strings.Count(body, "<form ") != 1 || strings.Contains(body, "<li>") || strings.Contains(body, "<li ") || strings.Contains(body, "/invites/") || strings.Contains(body, `href="/parties/`) {
 		t.Fatalf("empty tabs must have no entries or invite controls, but retain create form: %s", body)
 	}
