@@ -173,9 +173,6 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 				t.Fatalf("friends=%d summaries=%d", friendsCalls.Load(), playersCalls.Load())
 			}
 			wantIDs := []string{"leader", "friend-2"}
-			if scenario == "games error" || scenario == "both errors" {
-				wantIDs = []string{"leader"}
-			}
 			gamesMu.Lock()
 			gotIDs := slices.Clone(gameIDs)
 			gamesMu.Unlock()
