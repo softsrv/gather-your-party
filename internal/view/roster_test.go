@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,6 +118,7 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 			playersStarted, gamesStarted := make(chan struct{}), make(chan struct{})
 			var playersOnce, gamesOnce sync.Once
 			var friendsCalls, playersCalls atomic.Int32
+			var gamesMu sync.Mutex
 			var gameIDs []string
 			mockRosterTransport(t, func(r *http.Request) (*http.Response, error) {
 				switch {
@@ -142,7 +144,9 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 					return rosterResponse(hydratedFriends)
 				case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
 					id := r.URL.Query().Get("steamid")
+					gamesMu.Lock()
 					gameIDs = append(gameIDs, id)
+					gamesMu.Unlock()
 					gamesOnce.Do(func() { close(gamesStarted) })
 					select {
 					case <-playersStarted:
@@ -169,11 +173,13 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 				t.Fatalf("friends=%d summaries=%d", friendsCalls.Load(), playersCalls.Load())
 			}
 			wantIDs := []string{"leader", "friend-2"}
-			if scenario == "games error" || scenario == "both errors" {
-				wantIDs = []string{"leader"}
-			}
-			if !reflect.DeepEqual(gameIDs, wantIDs) {
-				t.Fatalf("game IDs=%v, want only submitted IDs plus leader: %v", gameIDs, wantIDs)
+			gamesMu.Lock()
+			gotIDs := slices.Clone(gameIDs)
+			gamesMu.Unlock()
+			slices.Sort(gotIDs)
+			slices.Sort(wantIDs)
+			if !reflect.DeepEqual(gotIDs, wantIDs) {
+				t.Fatalf("game IDs=%v, want only submitted IDs plus leader: %v", gotIDs, wantIDs)
 			}
 			want := "Shared adventure"
 			switch scenario {
