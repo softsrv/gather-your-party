@@ -199,18 +199,22 @@ func (s *Store) UserPendingInvites(ctx context.Context, userID int64) ([]UserPen
 	return invites, nil
 }
 
-// PartyMember is a member's stored identity and medium (64px) avatar.
+// PartyMember is a member's stored identity, medium (64px) avatar, and the
+// SteamID64 used to look up that member's owned games.
 type PartyMember struct {
 	UserID    int64
 	Name      string
 	AvatarURL string
 	IsLeader  bool
+	SteamID64 string
 }
 
 // PartyMembers lists members in seniority order, with user ID breaking ties.
+// SteamID64 is projected from the server-side memberships-through-users join,
+// never from request form input.
 func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT users.id, users.persona_name, users.avatar_medium, users.id = parties.leader_id
+		SELECT users.id, users.persona_name, users.avatar_medium, users.id = parties.leader_id, users.steam_id_64
 		FROM memberships JOIN users ON memberships.user_id = users.id
 		JOIN parties ON memberships.party_id = parties.id
 		WHERE memberships.party_id = $1
@@ -222,7 +226,7 @@ func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember
 	members := make([]PartyMember, 0)
 	for rows.Next() {
 		var member PartyMember
-		if err := rows.Scan(&member.UserID, &member.Name, &member.AvatarURL, &member.IsLeader); err != nil {
+		if err := rows.Scan(&member.UserID, &member.Name, &member.AvatarURL, &member.IsLeader, &member.SteamID64); err != nil {
 			return nil, fmt.Errorf("party members: scan: %w", err)
 		}
 		members = append(members, member)
