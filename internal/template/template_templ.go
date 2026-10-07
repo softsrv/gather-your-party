@@ -271,7 +271,7 @@ func PartiesPage(player steamapi.Player, parties []component.UserParty, invites 
 	})
 }
 
-func PartyDetail(player steamapi.Player, partyID string, partyName string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate) templ.Component {
+func PartyDetail(player steamapi.Player, partyID string, partyName string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate, sharedGames []component.SharedGameCount, privateMember string) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, templ_7745c5c3_W io.Writer) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templ_7745c5c3_W.(*bytes.Buffer)
 		if !templ_7745c5c3_IsBuffer {
@@ -336,7 +336,7 @@ func PartyDetail(player steamapi.Player, partyID string, partyName string, membe
 					return templ_7745c5c3_Err
 				}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("</div></div><div class=\"grid items-start gap-6 lg:grid-cols-[1fr_22rem]\">")
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("</div></div><div class=\"grid items-start gap-6 lg:grid-cols-[1fr_22rem]\"><div class=\"grid gap-6\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -344,7 +344,18 @@ func PartyDetail(player steamapi.Player, partyID string, partyName string, membe
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<div class=\"grid gap-6\">")
+			if privateMember != "" {
+				templ_7745c5c3_Err = component.PrivateLibraryNotice(privateMember).Render(ctx, templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			} else {
+				templ_7745c5c3_Err = component.SharedGamesWithCounts(sharedGames).Render(ctx, templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("</div><div class=\"grid gap-6\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

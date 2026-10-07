@@ -37,10 +37,10 @@ func (s *partyDetailStore) PartyMembers(_ context.Context, party string) ([]db.P
 	s.membersCalls++
 	s.loadedParty = party
 	members := []db.PartyMember{
-		{UserID: 42, Name: "Private Alyx", AvatarURL: "https://example.com/private-alyx.jpg", IsLeader: s.leader},
+		{UserID: 42, Name: "Private Alyx", AvatarURL: "https://example.com/private-alyx.jpg", SteamID: "76561198000000042", IsLeader: s.leader},
 	}
 	if !s.solo {
-		members = append(members, db.PartyMember{UserID: 7, Name: "Private Gordon", AvatarURL: "https://example.com/private-gordon.jpg", IsLeader: !s.leader})
+		members = append(members, db.PartyMember{UserID: 7, Name: "Private Gordon", AvatarURL: "https://example.com/private-gordon.jpg", SteamID: "76561198000000007", IsLeader: !s.leader})
 	}
 	return members, s.membersErr
 }
@@ -100,6 +100,10 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 						t.Error("player lookup did not use the live friend list")
 					}
 					body = `{"response":{"players":[{"steamid":"` + friendID + `","personaname":"Live friend"}]}}`
+				case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+					body = `{"response":{"games":[{"appid":10,"name":"Shared Title"}]}}`
+				case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/"):
+					body = `{"response":{"player_count":123}}`
 				default:
 					t.Fatalf("unexpected Steam endpoint: %s", r.URL.Path)
 				}
@@ -201,6 +205,20 @@ func TestPartyDetailRoutes(t *testing.T) {
 				member:     tc.member, memberErr: tc.memberErr, membersErr: tc.membersErr,
 			}
 			app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+			oldTransport := http.DefaultTransport
+			http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var body string
+				switch {
+				case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+					body = `{"response":{"games":[{"appid":10,"name":"Shared Title"}]}}`
+				case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/"):
+					body = `{"response":{"player_count":123}}`
+				default:
+					body = `{"response":{}}`
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = oldTransport })
 			party := testPartyID
 			if tc.invalidParty {
 				party = "not-a-uuid"
@@ -227,4 +245,151 @@ func TestPartyDetailRoutes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Shared-games computation runs over the full membership-guarded roster: a
+// public-library party sees the intersection annotated with live player counts,
+// a private-library party sees a named notice, and a non-member sees neither.
+func TestPartyDetailSharedGames(t *testing.T) {
+	const alyxID = "76561198000000042"
+	const gordonID = "76561198000000007"
+
+	t.Run("public libraries render intersection with player counts", func(t *testing.T) {
+		store := &partyDetailStore{
+			leaveStore: leaveStore{found: true},
+			member:     true,
+		}
+		app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+		t.Setenv("STEAM_API_KEY", "detail-test-key")
+		ownedCalls, countCalls := 0, 0
+		var countedAppIDs []string
+		oldTransport := http.DefaultTransport
+		http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var body string
+			switch {
+			case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+				ownedCalls++
+				switch r.URL.Query().Get("steamid") {
+				case alyxID:
+					body = `{"response":{"games":[{"appid":10,"name":"Overlap Quest"},{"appid":20,"name":"Alyx Only"}]}}`
+				case gordonID:
+					body = `{"response":{"games":[{"appid":10,"name":"Overlap Quest"},{"appid":30,"name":"Gordon Only"}]}}`
+				default:
+					t.Fatalf("owned-games lookup for unexpected steamid %q", r.URL.Query().Get("steamid"))
+				}
+			case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/"):
+				countCalls++
+				countedAppIDs = append(countedAppIDs, r.URL.Query().Get("appid"))
+				body = `{"response":{"player_count":777}}`
+			default:
+				t.Fatalf("unexpected Steam endpoint: %s", r.URL.Path)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+		t.Cleanup(func() { http.DefaultTransport = oldTransport })
+		w := httptest.NewRecorder()
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID+"?user_id=7&steamID=forged", "", true))
+		body := w.Body.String()
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, body)
+		}
+		// Intersection is exactly the overlapping game, annotated with its count.
+		if !strings.Contains(body, "Overlap Quest") {
+			t.Errorf("shared-games list missing intersected game: %s", body)
+		}
+		if !strings.Contains(body, "777 playing now") {
+			t.Errorf("shared game missing its live player count: %s", body)
+		}
+		for _, notShared := range []string{"Alyx Only", "Gordon Only"} {
+			if strings.Contains(body, notShared) {
+				t.Errorf("non-intersected game %q leaked into shared list: %s", notShared, body)
+			}
+		}
+		if ownedCalls != 2 {
+			t.Fatalf("owned-games calls=%d, want 2 (one per roster member)", ownedCalls)
+		}
+		if countCalls != 1 || len(countedAppIDs) != 1 || countedAppIDs[0] != "10" {
+			t.Fatalf("player-count calls=%d appids=%v, want one for appid 10", countCalls, countedAppIDs)
+		}
+	})
+
+	t.Run("private library renders named notice and no grid", func(t *testing.T) {
+		store := &partyDetailStore{
+			leaveStore: leaveStore{found: true},
+			member:     true,
+		}
+		app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+		t.Setenv("STEAM_API_KEY", "detail-test-key")
+		countCalls := 0
+		oldTransport := http.DefaultTransport
+		http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var body string
+			switch {
+			case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+				switch r.URL.Query().Get("steamid") {
+				case alyxID:
+					body = `{"response":{"games":[{"appid":10,"name":"Overlap Quest"}]}}`
+				case gordonID:
+					// Private library: no games -> steamapi NoGamesError for this ID.
+					body = `{"response":{"games":[]}}`
+				default:
+					t.Fatalf("owned-games lookup for unexpected steamid %q", r.URL.Query().Get("steamid"))
+				}
+			case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/"):
+				countCalls++
+				body = `{"response":{"player_count":1}}`
+			default:
+				t.Fatalf("unexpected Steam endpoint: %s", r.URL.Path)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+		t.Cleanup(func() { http.DefaultTransport = oldTransport })
+		w := httptest.NewRecorder()
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID+"?user_id=7&steamID=forged", "", true))
+		body := w.Body.String()
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, body)
+		}
+		if !strings.Contains(body, "Can't compute shared games") {
+			t.Errorf("missing can't-compute message: %s", body)
+		}
+		if !strings.Contains(body, "Private Gordon") {
+			t.Errorf("notice must name the private member by persona name: %s", body)
+		}
+		if strings.Contains(body, `id="shared-games-grid"`) {
+			t.Errorf("shared-games grid must not render on the private path: %s", body)
+		}
+		if countCalls != 0 {
+			t.Fatalf("player-count lookups ran despite a private library: %d", countCalls)
+		}
+	})
+
+	t.Run("non-member is refused with no shared-games computation", func(t *testing.T) {
+		store := &partyDetailStore{
+			leaveStore: leaveStore{found: true},
+			member:     false,
+		}
+		app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+		sharedCalls := 0
+		oldTransport := http.DefaultTransport
+		http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/GetOwnedGames/") || strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/") {
+				sharedCalls++
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"response":{}}`))}, nil
+		})
+		t.Cleanup(func() { http.DefaultTransport = oldTransport })
+		w := httptest.NewRecorder()
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID+"?user_id=7&steamID=forged", "", true))
+		body := w.Body.String()
+		if w.Code != http.StatusForbidden || !strings.Contains(body, "party members only") {
+			t.Fatalf("non-member not refused: status=%d body=%s", w.Code, body)
+		}
+		if store.membersCalls != 0 {
+			t.Fatalf("non-member path loaded the roster: calls=%d", store.membersCalls)
+		}
+		if sharedCalls != 0 {
+			t.Fatalf("non-member path ran shared-games computation: calls=%d", sharedCalls)
+		}
+	})
 }

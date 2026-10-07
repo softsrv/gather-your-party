@@ -556,6 +556,56 @@ templ SharedGames(games []steamapi.Game) {
 	}
 }
 
+// SharedGameCount pairs a shared game with its live player count for rendering.
+type SharedGameCount struct {
+	Game        steamapi.Game
+	PlayerCount int
+}
+
+templ SharedGamesWithCounts(games []SharedGameCount) {
+	if len(games) == 0 {
+		@EmptyState("gamepad", "No games in common", "Nobody in this group owns the same game yet. Try a different mix of friends.")
+	} else {
+		<div class="space-y-4" aria-label="Shared games">
+			<h3 class="flex items-center gap-2 text-lg font-bold">
+				<span class="badge badge-primary">{ strconv.Itoa(len(games)) }</span>
+				if len(games) == 1 {
+					game you can all play
+				} else {
+					games you can all play
+				}
+			</h3>
+			<ul id="shared-games-grid" class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+				for _, shared := range games {
+					<li data-name={ strings.ToLower(shared.Game.Name) } class="group overflow-hidden rounded-xl border border-white/5 bg-base-200/70 transition hover:-translate-y-0.5 hover:border-white/15 hover:shadow-lg hover:shadow-black/30">
+						<div class="relative grid aspect-[460/215] place-items-center bg-gradient-to-br from-neutral to-base-300">
+							if shared.Game.ImgIconURL != "" {
+								<img src={ gameIconURL(shared.Game.AppID, shared.Game.ImgIconURL) } alt="" class="h-10 w-10 rounded-md opacity-80" loading="lazy"/>
+							}
+							<img src={ gameHeaderURL(shared.Game.AppID) } alt="" class="absolute inset-0 h-full w-full object-cover" loading="lazy" onerror="this.remove()"/>
+						</div>
+						<div class="p-2.5">
+							<p class="truncate text-sm font-medium" title={ shared.Game.Name }>{ shared.Game.Name }</p>
+							<p class="text-xs text-base-content/50">{ strconv.Itoa(shared.PlayerCount) } playing now</p>
+						</div>
+					</li>
+				}
+			</ul>
+		</div>
+	}
+}
+
+// PrivateLibraryNotice explains that shared games cannot be computed because a
+// named member's Steam library is private.
+templ PrivateLibraryNotice(memberName string) {
+	<div class="alert border-warning/30 bg-warning/10 text-base-content" role="status" aria-label="Shared games unavailable">
+		@Icon("alert", "h-5 w-5 shrink-0 text-warning")
+		<p class="text-sm">
+			Can't compute shared games because { memberName }'s Steam library is private.
+		</p>
+	</div>
+}
+
 templ TextAndTitle(title string, text string) {
 	<div>
 		<h1 class="text-lg font-bold">{ title }</h1>

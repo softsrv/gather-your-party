@@ -87,7 +87,7 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 		if _, err := store.UpsertUser(ctx, steamID, profile); err != nil {
 			t.Fatal(err)
 		}
-		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium}
+		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium, SteamID: steamID}
 	}
 	party, err := store.CreateParty(ctx, members[0].UserID, "Roster")
 	if err != nil {

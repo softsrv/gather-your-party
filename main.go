@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -405,7 +406,54 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 			}
 		}
 	}
-	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates).Render(ctx, w); err != nil {
+	// Shared games run over the FULL membership-guarded roster: pick the first
+	// member as caller and the rest as the variadic other IDs.
+	var sharedGames []component.SharedGameCount
+	var privateMember string
+	if len(members) > 0 {
+		sharedService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+		sharedDeadline := time.Now().Add(5000 * time.Millisecond)
+		sharedCtx, cancelShared := context.WithDeadline(ctx.Context, sharedDeadline)
+		defer cancelShared()
+		callerID := members[0].SteamID
+		otherIDs := make([]string, 0, len(members)-1)
+		for _, member := range members[1:] {
+			otherIDs = append(otherIDs, member.SteamID)
+		}
+		games, err := sharedService.SharedGames(sharedCtx, callerID, otherIDs...)
+		if err != nil {
+			var noGames *steamapi.NoGamesError
+			if errors.As(err, &noGames) {
+				// Name the offending member whose library is private.
+				privateMember = "a party member"
+				for _, offending := range noGames.SteamIDs {
+					for _, member := range members {
+						if member.SteamID == offending && member.Name != "" {
+							privateMember = member.Name
+							break
+						}
+					}
+					if privateMember != "a party member" {
+						break
+					}
+				}
+			} else {
+				http.Error(w, "unable to compute shared games", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			sharedGames = make([]component.SharedGameCount, 0, len(games))
+			for _, game := range games {
+				count, err := sharedService.GetNumberOfCurrentPlayers(sharedCtx, strconv.Itoa(game.AppID))
+				if err != nil {
+					http.Error(w, "unable to load player counts", http.StatusInternalServerError)
+					return
+				}
+				sharedGames = append(sharedGames, component.SharedGameCount{Game: game, PlayerCount: count})
+			}
+		}
+	}
+	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates, sharedGames, privateMember).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
