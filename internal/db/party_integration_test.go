@@ -87,7 +87,7 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 		if _, err := store.UpsertUser(ctx, steamID, profile); err != nil {
 			t.Fatal(err)
 		}
-		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium}
+		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium, SteamID64: steamID}
 	}
 	party, err := store.CreateParty(ctx, members[0].UserID, "Roster")
 	if err != nil {
@@ -143,6 +143,47 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 	}
 	if _, err := store.PartyMembers(ctx, "not-a-uuid"); err == nil {
 		t.Fatal("invalid party ID must return an error")
+	}
+}
+
+// [CLM-2] PartyMembers selects each member's stored Steam account id
+// (steam_id_64) from the server-side users-through-memberships join. The
+// assertion compares against the exact seeded value per member, so if the
+// query stopped selecting steam_id_64 (e.g. the column were dropped from the
+// SELECT list or the scan target removed), SteamID64 would come back zero
+// value and this test would fail.
+func TestPartyMembersIncludesSeededSteamID64(t *testing.T) {
+	store, _, ctx := partyTestStore(t)
+	leaderSteamID := "76561198000000201"
+	memberSteamID := "76561198000000202"
+	leader := partyTestUser(t, store, ctx, leaderSteamID)
+	member := partyTestUser(t, store, ctx, memberSteamID)
+	party, err := store.CreateParty(ctx, leader, "Steam id roster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendInvite(ctx, party, leader, member); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcceptInvite(ctx, party, member); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.PartyMembers(ctx, party)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("members=%+v, want 2", got)
+	}
+	bySteamID := make(map[int64]string, len(got))
+	for _, member := range got {
+		bySteamID[member.UserID] = member.SteamID64
+	}
+	if bySteamID[leader] != leaderSteamID {
+		t.Errorf("leader SteamID64=%q, want seeded %q", bySteamID[leader], leaderSteamID)
+	}
+	if bySteamID[member] != memberSteamID {
+		t.Errorf("member SteamID64=%q, want seeded %q", bySteamID[member], memberSteamID)
 	}
 }
 
