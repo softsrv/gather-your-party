@@ -353,7 +353,7 @@ func TestPartyDetailSharedGames(t *testing.T) {
 		if !strings.Contains(body, "Can't compute shared games") {
 			t.Errorf("missing can't-compute message: %s", body)
 		}
-		if !strings.Contains(body, "Private Gordon") {
+		if !strings.Contains(body, "Private Gordon's Steam library is private") {
 			t.Errorf("notice must name the private member by persona name: %s", body)
 		}
 		if strings.Contains(body, `id="shared-games-grid"`) {
