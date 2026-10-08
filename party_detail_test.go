@@ -37,10 +37,10 @@ func (s *partyDetailStore) PartyMembers(_ context.Context, party string) ([]db.P
 	s.membersCalls++
 	s.loadedParty = party
 	members := []db.PartyMember{
-		{UserID: 42, Name: "Private Alyx", AvatarURL: "https://example.com/private-alyx.jpg", IsLeader: s.leader},
+		{UserID: 42, SteamID64: testSteamID, Name: "Private Alyx", AvatarURL: "https://example.com/private-alyx.jpg", IsLeader: s.leader},
 	}
 	if !s.solo {
-		members = append(members, db.PartyMember{UserID: 7, Name: "Private Gordon", AvatarURL: "https://example.com/private-gordon.jpg", IsLeader: !s.leader})
+		members = append(members, db.PartyMember{UserID: 7, SteamID64: "76561198000000007", Name: "Private Gordon", AvatarURL: "https://example.com/private-gordon.jpg", IsLeader: !s.leader})
 	}
 	return members, s.membersErr
 }
@@ -85,6 +85,8 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 				}
 				var body string
 				switch {
+				case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+					body = `{"response":{"games":[]}}`
 				case strings.Contains(r.URL.Path, "/GetFriendList/"):
 					friendCalls++
 					if r.URL.Query().Get("steamid") != testSteamID {
@@ -170,9 +172,38 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 	}
 }
 
+func TestPartyDetailSharedGamesFailure(t *testing.T) {
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("private Steam failure details")
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+	app := application{store: &partyDetailStore{leaveStore: leaveStore{found: true}, member: true}, config: appConfig{SessionSecret: "leave-test-secret"}}
+	w := httptest.NewRecorder()
+	app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID, "", true))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "unable to load shared games") || strings.Contains(w.Body.String(), "private Steam failure details") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// mockEmptyPartyLibraries keeps roster/authorization tests independent of Steam.
+func mockEmptyPartyLibraries(t *testing.T) {
+	t.Helper()
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if !strings.Contains(r.URL.Path, "/GetOwnedGames/") {
+			t.Errorf("unexpected Steam endpoint: %s", r.URL.Path)
+			return nil, errors.New("unexpected Steam endpoint")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"response":{"games":[]}}`))}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+}
+
 // A populated lookup remains available even for denial cases: removing the
 // guard leaks these rows and makes the response-absence assertions fail.
 func TestPartyDetailRoutes(t *testing.T) {
+	mockEmptyPartyLibraries(t)
 	for _, tc := range []struct {
 		name          string
 		authenticated bool

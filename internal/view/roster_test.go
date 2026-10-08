@@ -167,6 +167,8 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 						return rosterResponse(`{"response":{"games":[]}}`)
 					}
 					return rosterResponse(ownedGame)
+				case r.URL.Host == "store.steampowered.com" && r.URL.Path == "/api/appdetails" && r.URL.Query().Get("appids") == "10":
+					return rosterResponse(`{"10":{"success":true,"data":{"categories":[{"id":1,"description":"Multi-player"}]}}}`)
 				default:
 					return nil, errors.New("unexpected Steam endpoint")
 				}

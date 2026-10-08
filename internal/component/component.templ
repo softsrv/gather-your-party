@@ -538,6 +538,30 @@ templ Library(games []steamapi.Game) {
 	}
 }
 
+// SharedGameCount pairs a shared game with its live global player count.
+type SharedGameCount struct {
+	Game        steamapi.Game
+	PlayerCount int
+}
+
+templ SharedGamesWithCounts(games []SharedGameCount) {
+	if len(games) == 0 {
+		@EmptyState("gamepad", "No games in common", "This party has no multiplayer games in common.")
+	} else {
+		<ul id="party-shared-games-grid" class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+			for _, entry := range games {
+				<li data-appid={ strconv.Itoa(entry.Game.AppID) } class="overflow-hidden rounded-xl border border-white/5 bg-base-200/70">
+					<img src={ gameHeaderURL(entry.Game.AppID) } alt="" class="w-full" loading="lazy"/>
+					<div class="p-2.5">
+						<p class="truncate text-sm font-medium" title={ entry.Game.Name }>{ entry.Game.Name }</p>
+						<p class="text-xs text-base-content/50">{ strconv.Itoa(entry.PlayerCount) } players online now</p>
+					</div>
+				</li>
+			}
+		</ul>
+	}
+}
+
 templ SharedGames(games []steamapi.Game) {
 	if len(games) == 0 {
 		@EmptyState("gamepad", "No games in common", "Nobody in this group owns the same game yet. Try a different mix of friends.")

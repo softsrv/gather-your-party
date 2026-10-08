@@ -263,6 +263,7 @@ func (s partyDetailGuardBypass) IsMember(context.Context, string, int64) (bool, 
 // receives real member names/avatars when the guard decision is bypassed.
 // Removing the handler's guard makes the first absence assertions fail.
 func TestPartyDetailNonMemberGuardRealStore(t *testing.T) {
+	mockEmptyPartyLibraries(t)
 	store, pool, ctx := inviteIntegrationStore(t)
 	profiles := []steamapi.Player{
 		{PersonaName: "Private leader", AvatarMedium: "https://example.com/private-leader.jpg"},

@@ -87,7 +87,7 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 		if _, err := store.UpsertUser(ctx, steamID, profile); err != nil {
 			t.Fatal(err)
 		}
-		members[i] = PartyMember{UserID: id, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium}
+		members[i] = PartyMember{UserID: id, SteamID64: steamID, Name: profile.PersonaName, AvatarURL: profile.AvatarMedium}
 	}
 	party, err := store.CreateParty(ctx, members[0].UserID, "Roster")
 	if err != nil {
@@ -143,6 +143,36 @@ func TestPartyMembersProfilesAndOrder(t *testing.T) {
 	}
 	if _, err := store.PartyMembers(ctx, "not-a-uuid"); err == nil {
 		t.Fatal("invalid party ID must return an error")
+	}
+}
+
+// CLM-5: the stored Steam identities follow membership seniority, not ID order.
+func TestPartyMembersSteamIDsInSeniorityOrder(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	steamIDs := []string{"76561198000000801", "76561198000000802", "76561198000000803"}
+	users := make([]int64, len(steamIDs))
+	for i, steamID := range steamIDs {
+		users[i] = partyTestUser(t, store, ctx, steamID)
+	}
+	party, err := store.CreateParty(ctx, users[0], "Steam identities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET joined_at=$2 WHERE party_id=$1`, party, joined.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id,joined_at) VALUES ($1,$2,$3),($1,$4,$5)`, party, users[2], joined, users[1], joined.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	members, err := store.PartyMembers(ctx, party)
+	if err != nil || len(members) != 3 {
+		t.Fatalf("members=%+v err=%v", members, err)
+	}
+	for i, seed := range []int{2, 0, 1} {
+		if members[i].UserID != users[seed] || members[i].SteamID64 != steamIDs[seed] {
+			t.Errorf("member %d=%+v want user=%d steamID=%s", i, members[i], users[seed], steamIDs[seed])
+		}
 	}
 }
 
