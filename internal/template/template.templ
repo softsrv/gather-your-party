@@ -74,7 +74,7 @@ templ PartiesPage(player steamapi.Player, parties []component.UserParty, invites
 	}
 }
 
-templ PartyDetail(player steamapi.Player, partyID string, partyName string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate) {
+templ PartyDetail(player steamapi.Player, partyID string, partyName string, members []component.PartyMember, isLeader bool, inviteCandidates []component.InviteCandidate, stepDownCandidates []component.StepDownCandidate, sharedGames []component.SharedGameCount, gamesMessages []string) {
 	@Page("Party details", component.NavState{Player: player, SignedIn: true, Active: "parties"}) {
 		<div class="space-y-4">
 			<a href="/parties" class="btn btn-ghost btn-sm -ml-3 gap-2 text-base-content/60">
@@ -98,7 +98,17 @@ templ PartyDetail(player steamapi.Player, partyID string, partyName string, memb
 			</div>
 		</div>
 		<div class="grid items-start gap-6 lg:grid-cols-[1fr_22rem]">
-			@component.PartyRoster(members)
+			<div class="grid gap-6">
+				@component.PartyRoster(members)
+				<section aria-label="Shared games" class="space-y-4">
+					<h2 class="text-lg font-bold">Shared games</h2>
+					if len(gamesMessages) > 0 {
+						@ErrorMessages(gamesMessages)
+					} else {
+						@component.SharedGamesWithCounts(sharedGames)
+					}
+				</section>
+			</div>
 			<div class="grid gap-6">
 				if isLeader {
 					@component.InvitePicker(partyID, inviteCandidates)

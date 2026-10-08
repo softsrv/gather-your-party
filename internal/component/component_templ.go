@@ -1852,7 +1852,13 @@ func Library(games []steamapi.Game) templ.Component {
 	})
 }
 
-func SharedGames(games []steamapi.Game) templ.Component {
+// SharedGameCount pairs a shared game with its live global player count.
+type SharedGameCount struct {
+	Game        steamapi.Game
+	PlayerCount int
+}
+
+func SharedGamesWithCounts(games []SharedGameCount) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, templ_7745c5c3_W io.Writer) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templ_7745c5c3_W.(*bytes.Buffer)
 		if !templ_7745c5c3_IsBuffer {
@@ -1866,6 +1872,112 @@ func SharedGames(games []steamapi.Game) templ.Component {
 		}
 		ctx = templ.ClearChildren(ctx)
 		if len(games) == 0 {
+			templ_7745c5c3_Err = EmptyState("gamepad", "No games in common", "This party has no multiplayer games in common.").Render(ctx, templ_7745c5c3_Buffer)
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<ul id=\"party-shared-games-grid\" class=\"grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			for _, entry := range games {
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<li data-appid=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var84 string
+				templ_7745c5c3_Var84, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(entry.Game.AppID))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 553, Col: 51}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var84))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("\" class=\"overflow-hidden rounded-xl border border-white/5 bg-base-200/70\"><img src=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var85 string
+				templ_7745c5c3_Var85, templ_7745c5c3_Err = templ.JoinStringErrs(gameHeaderURL(entry.Game.AppID))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 554, Col: 47}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var85))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("\" alt=\"\" class=\"w-full\" loading=\"lazy\"><div class=\"p-2.5\"><p class=\"truncate text-sm font-medium\" title=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var86 string
+				templ_7745c5c3_Var86, templ_7745c5c3_Err = templ.JoinStringErrs(entry.Game.Name)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 556, Col: 69}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var86))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("\">")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var87 string
+				templ_7745c5c3_Var87, templ_7745c5c3_Err = templ.JoinStringErrs(entry.Game.Name)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 556, Col: 89}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var87))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("</p><p class=\"text-xs text-base-content/50\">")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var88 string
+				templ_7745c5c3_Var88, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(entry.PlayerCount))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 557, Col: 79}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var88))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(" players online now</p></div></li>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("</ul>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		if !templ_7745c5c3_IsBuffer {
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteTo(templ_7745c5c3_W)
+		}
+		return templ_7745c5c3_Err
+	})
+}
+
+func SharedGames(games []steamapi.Game) templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, templ_7745c5c3_W io.Writer) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templ_7745c5c3_W.(*bytes.Buffer)
+		if !templ_7745c5c3_IsBuffer {
+			templ_7745c5c3_Buffer = templ.GetBuffer()
+			defer templ.ReleaseBuffer(templ_7745c5c3_Buffer)
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var89 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var89 == nil {
+			templ_7745c5c3_Var89 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		if len(games) == 0 {
 			templ_7745c5c3_Err = EmptyState("gamepad", "No games in common", "Nobody in this group owns the same game yet. Try a different mix of friends.").Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
@@ -1875,12 +1987,12 @@ func SharedGames(games []steamapi.Game) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var84 string
-			templ_7745c5c3_Var84, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(len(games)))
+			var templ_7745c5c3_Var90 string
+			templ_7745c5c3_Var90, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(len(games)))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 547, Col: 64}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 571, Col: 64}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var84))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var90))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -1927,21 +2039,21 @@ func TextAndTitle(title string, text string) templ.Component {
 			defer templ.ReleaseBuffer(templ_7745c5c3_Buffer)
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var85 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var85 == nil {
-			templ_7745c5c3_Var85 = templ.NopComponent
+		templ_7745c5c3_Var91 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var91 == nil {
+			templ_7745c5c3_Var91 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<div><h1 class=\"text-lg font-bold\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var86 string
-		templ_7745c5c3_Var86, templ_7745c5c3_Err = templ.JoinStringErrs(title)
+		var templ_7745c5c3_Var92 string
+		templ_7745c5c3_Var92, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 561, Col: 39}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 585, Col: 39}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var86))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var92))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1949,12 +2061,12 @@ func TextAndTitle(title string, text string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var87 string
-		templ_7745c5c3_Var87, templ_7745c5c3_Err = templ.JoinStringErrs(text)
+		var templ_7745c5c3_Var93 string
+		templ_7745c5c3_Var93, templ_7745c5c3_Err = templ.JoinStringErrs(text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 562, Col: 27}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 586, Col: 27}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var87))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var93))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -1977,9 +2089,9 @@ func ErrorMessage(msg string) templ.Component {
 			defer templ.ReleaseBuffer(templ_7745c5c3_Buffer)
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var88 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var88 == nil {
-			templ_7745c5c3_Var88 = templ.NopComponent
+		templ_7745c5c3_Var94 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var94 == nil {
+			templ_7745c5c3_Var94 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		templ_7745c5c3_Err = ErrorMessages([]string{msg}).Render(ctx, templ_7745c5c3_Buffer)
@@ -2001,9 +2113,9 @@ func ErrorMessages(msgs []string) templ.Component {
 			defer templ.ReleaseBuffer(templ_7745c5c3_Buffer)
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var89 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var89 == nil {
-			templ_7745c5c3_Var89 = templ.NopComponent
+		templ_7745c5c3_Var95 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var95 == nil {
+			templ_7745c5c3_Var95 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<div class=\"alert border-error/30 bg-error/10 text-base-content\" role=\"alert\">")
@@ -2023,12 +2135,12 @@ func ErrorMessages(msgs []string) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var90 string
-			templ_7745c5c3_Var90, templ_7745c5c3_Err = templ.JoinStringErrs(msg)
+			var templ_7745c5c3_Var96 string
+			templ_7745c5c3_Var96, templ_7745c5c3_Err = templ.JoinStringErrs(msg)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 575, Col: 13}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 599, Col: 13}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var90))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var96))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2056,9 +2168,9 @@ func Signin() templ.Component {
 			defer templ.ReleaseBuffer(templ_7745c5c3_Buffer)
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var91 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var91 == nil {
-			templ_7745c5c3_Var91 = templ.NopComponent
+		templ_7745c5c3_Var97 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var97 == nil {
+			templ_7745c5c3_Var97 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<section class=\"grid items-center gap-12 py-8 lg:grid-cols-[1.1fr_1fr] lg:py-16\"><div><p class=\"eyebrow\">Game night, organized</p><h1 class=\"mt-3 text-5xl font-extrabold leading-[1.05] sm:text-6xl\">Gather your party. <span class=\"block bg-gradient-to-r from-primary via-[#f59e8b] to-secondary bg-clip-text text-transparent\">Skip the group chat.</span></h1><p class=\"mt-5 max-w-xl text-lg text-base-content/70\">Form a party with your Steam friends, then instantly see which games everyone already owns, so you spend game night playing instead of deciding.</p><div class=\"mt-8 flex flex-wrap items-center gap-4\"><a href=\"/auth/steam\" class=\"btn btn-primary btn-lg gap-3 shadow-lg shadow-primary/20\">")
@@ -2074,8 +2186,8 @@ func Signin() templ.Component {
 			return templ_7745c5c3_Err
 		}
 		for i, name := range []string{"S", "A", "K", "L"} {
-			var templ_7745c5c3_Var92 = []any{"avatar-fallback h-10 w-10 ring-2 ring-base-100", []string{"bg-primary text-primary-content", "bg-secondary text-secondary-content", "bg-accent text-accent-content", "bg-neutral"}[i]}
-			templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var92...)
+			var templ_7745c5c3_Var98 = []any{"avatar-fallback h-10 w-10 ring-2 ring-base-100", []string{"bg-primary text-primary-content", "bg-secondary text-secondary-content", "bg-accent text-accent-content", "bg-neutral"}[i]}
+			templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var98...)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2083,12 +2195,12 @@ func Signin() templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var93 string
-			templ_7745c5c3_Var93, templ_7745c5c3_Err = templ.JoinStringErrs(templ.CSSClasses(templ_7745c5c3_Var92).String())
+			var templ_7745c5c3_Var99 string
+			templ_7745c5c3_Var99, templ_7745c5c3_Err = templ.JoinStringErrs(templ.CSSClasses(templ_7745c5c3_Var98).String())
 			if templ_7745c5c3_Err != nil {
 				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 1, Col: 0}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var93))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var99))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2096,12 +2208,12 @@ func Signin() templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var94 string
-			templ_7745c5c3_Var94, templ_7745c5c3_Err = templ.JoinStringErrs(name)
+			var templ_7745c5c3_Var100 string
+			templ_7745c5c3_Var100, templ_7745c5c3_Err = templ.JoinStringErrs(name)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 609, Col: 211}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 633, Col: 211}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var94))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var100))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2119,12 +2231,12 @@ func Signin() templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var95 string
-			templ_7745c5c3_Var95, templ_7745c5c3_Err = templ.JoinStringErrs(game)
+			var templ_7745c5c3_Var101 string
+			templ_7745c5c3_Var101, templ_7745c5c3_Err = templ.JoinStringErrs(game)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 616, Col: 58}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 640, Col: 58}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var95))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var101))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2168,9 +2280,9 @@ func Step(number string, icon string, title string, text string) templ.Component
 			defer templ.ReleaseBuffer(templ_7745c5c3_Buffer)
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var96 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var96 == nil {
-			templ_7745c5c3_Var96 = templ.NopComponent
+		templ_7745c5c3_Var102 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var102 == nil {
+			templ_7745c5c3_Var102 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString("<div class=\"panel p-5\"><div class=\"flex items-center gap-3\"><span class=\"grid h-10 w-10 place-items-center rounded-xl bg-white/5 text-primary\">")
@@ -2185,12 +2297,12 @@ func Step(number string, icon string, title string, text string) templ.Component
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var97 string
-		templ_7745c5c3_Var97, templ_7745c5c3_Err = templ.JoinStringErrs(number)
+		var templ_7745c5c3_Var103 string
+		templ_7745c5c3_Var103, templ_7745c5c3_Err = templ.JoinStringErrs(number)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 636, Col: 82}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 660, Col: 82}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var97))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var103))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2198,12 +2310,12 @@ func Step(number string, icon string, title string, text string) templ.Component
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var98 string
-		templ_7745c5c3_Var98, templ_7745c5c3_Err = templ.JoinStringErrs(title)
+		var templ_7745c5c3_Var104 string
+		templ_7745c5c3_Var104, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 638, Col: 44}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 662, Col: 44}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var98))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var104))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2211,12 +2323,12 @@ func Step(number string, icon string, title string, text string) templ.Component
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var99 string
-		templ_7745c5c3_Var99, templ_7745c5c3_Err = templ.JoinStringErrs(text)
+		var templ_7745c5c3_Var105 string
+		templ_7745c5c3_Var105, templ_7745c5c3_Err = templ.JoinStringErrs(text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 639, Col: 53}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 663, Col: 53}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var99))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var105))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

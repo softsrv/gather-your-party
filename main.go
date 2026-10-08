@@ -369,6 +369,14 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 		http.Error(w, "unable to load party members", http.StatusInternalServerError)
 		return
 	}
+	service := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+	gamesCtx, cancelGames := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancelGames()
+	sharedGames, gamesMessages, err := view.BuildSharedGames(gamesCtx, service, members)
+	if err != nil {
+		http.Error(w, "unable to load shared games", http.StatusInternalServerError)
+		return
+	}
 	roster := make([]component.PartyMember, 0, len(members))
 	isLeader := false
 	for _, member := range members {
@@ -405,7 +413,7 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 			}
 		}
 	}
-	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates).Render(ctx, w); err != nil {
+	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates, sharedGames, gamesMessages).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
