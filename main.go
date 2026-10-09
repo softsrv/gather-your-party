@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +24,7 @@ import (
 	"gather-your-party/internal/template"
 	"gather-your-party/internal/view"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -59,8 +64,29 @@ type application struct {
 	config appConfig
 }
 
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
 func main() {
+	loadEnv()
+	if err := run(context.Background(), (*application).serve); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// loadEnv preserves process-environment precedence and optional local .env files.
+func loadEnv() {
+	if filename := os.Getenv("ENV_FILE_PATH"); filename != "" {
+		_ = godotenv.Load(filename)
+		return
+	}
 	_ = godotenv.Load()
+}
+
+// run completes startup before handing control to the HTTP server. Only main
+// exits the process, so callers can exercise startup and its failures directly.
+func run(ctx context.Context, serve func(*application) error) error {
 	config := appConfig{
 		SessionSecret: os.Getenv("SESSION_SECRET"),
 		AppBaseURL:    os.Getenv("APP_BASE_URL"),
@@ -68,23 +94,83 @@ func main() {
 	// Without these, Steam rejects the OpenID return_to ("invalid return protocol")
 	// or the callback silently refuses every sign-in.
 	if config.SessionSecret == "" {
-		fmt.Fprintln(os.Stderr, "SESSION_SECRET is required")
-		os.Exit(1)
+		return errors.New("SESSION_SECRET is required")
 	}
 	if base, err := url.Parse(config.AppBaseURL); err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
-		fmt.Fprintln(os.Stderr, "APP_BASE_URL must be an absolute http(s) origin, e.g. http://localhost:8080")
-		os.Exit(1)
+		return errors.New("APP_BASE_URL must be an absolute http(s) origin, e.g. http://localhost:8080")
 	}
-	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	pool, err := connect(ctx)
 	if err != nil {
-		// Do not log the DSN or parsing error, which can contain credentials.
-		fmt.Fprintln(os.Stderr, "unable to initialize database pool")
-		return
+		return err
 	}
 	defer pool.Close()
+	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
+		return err
+	}
 
 	app := application{store: db.New(pool), config: config}
-	app.serve()
+	return serve(&app)
+}
+
+func connect(ctx context.Context) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		// DSNs and driver errors can contain credentials; do not expose them.
+		return nil, errors.New("unable to initialize database pool")
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, errors.New("unable to connect to database")
+	}
+	return pool, nil
+}
+
+func migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, dir string) error {
+	// fs.ReadDir returns entries sorted by filename, including for embed.FS.
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return errors.New("unable to read migrations")
+	}
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		filename text PRIMARY KEY,
+		applied_at timestamptz NOT NULL DEFAULT now()
+	)`); err != nil {
+		return errors.New("unable to initialize migration tracking")
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var applied bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = $1)`, entry.Name()).Scan(&applied); err != nil {
+				return err
+			}
+			if applied {
+				return nil
+			}
+			migration, err := fs.ReadFile(fsys, path.Join(dir, entry.Name()))
+			if err != nil {
+				return err
+			}
+			// The original psql migrations have an outer BEGIN;/COMMIT; pair.
+			// Remove that envelope so it cannot commit before the tracking row.
+			sql := strings.TrimSpace(string(migration))
+			if strings.HasPrefix(sql, "BEGIN;") && strings.HasSuffix(sql, "COMMIT;") {
+				sql = strings.TrimSuffix(strings.TrimPrefix(sql, "BEGIN;"), "COMMIT;")
+			}
+			if _, err := tx.Exec(ctx, sql); err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1)`, entry.Name())
+			return err
+		})
+		if err != nil {
+			// Do not expose database errors, which may include connection details.
+			return fmt.Errorf("unable to apply migration %s", entry.Name())
+		}
+	}
+	return nil
 }
 
 func (app *application) handleSteamLogin(w http.ResponseWriter, r *http.Request) {
@@ -617,11 +703,7 @@ func (app *application) routes() http.Handler {
 	return mux
 }
 
-func (app *application) serve() {
+func (app *application) serve() error {
 	fmt.Printf("server is running on port %s\n", os.Getenv("LISTEN_ADDR"))
-	err := http.ListenAndServe(":"+os.Getenv("LISTEN_ADDR"), app.routes())
-	if err != nil {
-		fmt.Println(err)
-	}
-
+	return http.ListenAndServe(":"+os.Getenv("LISTEN_ADDR"), app.routes())
 }
