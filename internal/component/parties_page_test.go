@@ -23,7 +23,7 @@ func TestPartiesPage(t *testing.T) {
 	body := buf.String()
 	for _, want := range []string{
 		`<title>Parties</title>`, `<script src="/static/script/htmx.min.js"`,
-		`<div role="tablist" class="tabs tabs-lifted">`,
+		`<div role="tablist" class="tabs tabs-border">`,
 		`type="radio" name="parties-tabs" id="current-parties-tab" role="tab"`,
 		`aria-label="Current parties" aria-controls="current-parties-panel" checked`,
 		`type="radio" name="parties-tabs" id="invites-tab" role="tab"`,

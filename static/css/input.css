@@ -1,6 +1,39 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../../tailwind.config.js";
+@plugin "daisyui" {
+  themes: false;
+}
+
+/* Tavern at night: deep indigo surfaces, warm amber primary, violet and mint accents. */
+@plugin "daisyui/theme" {
+  name: "tavern";
+  default: true;
+  color-scheme: dark;
+  --color-primary: #f6b547;
+  --color-primary-content: #1f1403;
+  --color-secondary: #a78bfa;
+  --color-secondary-content: #160c2e;
+  --color-accent: #4fd1a5;
+  --color-accent-content: #04201a;
+  --color-neutral: #2a2542;
+  --color-neutral-content: #e7e3f5;
+  --color-base-100: #1b1830;
+  --color-base-200: #151226;
+  --color-base-300: #0f0d1c;
+  --color-base-content: #e7e3f5;
+  --color-info: #7cb4ff;
+  --color-success: #4fd1a5;
+  --color-warning: #f6b547;
+  --color-error: #f47272;
+  --radius-box: 1rem;
+  --radius-field: 0.7rem;
+  --radius-selector: 999px;
+}
+
+/* Preserve the existing component layers' rounded-btn shorthand with the v5 token. */
+@theme inline {
+  --radius-btn: var(--radius-field);
+}
 
 @layer base {
   body {

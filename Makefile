@@ -2,8 +2,8 @@
 TEMPL_VERSION := $(shell go list -m -f '{{.Version}}' github.com/a-h/templ)
 TEMPL := go run github.com/a-h/templ/cmd/templ@$(TEMPL_VERSION)
 
-# The project uses a Tailwind v3 config (with daisyUI); a global v4 binary breaks the build.
-TAILWIND := npx --yes tailwindcss@3.4.3
+# Tailwind v4 provides its CLI separately; daisyUI is loaded from the CSS entrypoint.
+TAILWIND := npx --yes @tailwindcss/cli@latest
 
 # Local dev Postgres. Matches DATABASE_URL in .env:
 #   postgres://gyp:gyp@localhost:54329/gather_your_party?sslmode=disable
