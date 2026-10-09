@@ -184,7 +184,7 @@ type UserPendingInvite struct {
 }
 
 templ PartiesTabs(parties []UserParty, invites []UserPendingInvite) {
-	<div role="tablist" class="tabs tabs-lifted">
+	<div role="tablist" class="tabs tabs-border">
 		<input type="radio" name="parties-tabs" id="current-parties-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Current parties" aria-controls="current-parties-panel" checked/>
 		<section id="current-parties-panel" role="tabpanel" aria-labelledby="current-parties-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6">
 			if len(parties) == 0 {
@@ -225,7 +225,7 @@ templ CreatePartyForm() {
 		<p class="mb-5 mt-1 text-sm text-base-content/60">You'll lead it, so you can invite Steam friends and hand off leadership later.</p>
 		<form method="post" action="/parties" hx-post="/parties">
 			<label for="party-name">Party name</label>
-			<input type="text" id="party-name" name="name" class="input input-bordered w-full bg-base-200" placeholder="e.g. Friday Night Raid" autocomplete="off" required/>
+			<input type="text" id="party-name" name="name" class="input w-full bg-base-200" placeholder="e.g. Friday Night Raid" autocomplete="off" required/>
 			<div class="mt-4 grid">
 				<button type="submit" class="btn btn-primary">Create party</button>
 			</div>
@@ -428,7 +428,7 @@ func personaStatus(p steamapi.Player) (string, string) {
 }
 
 templ SearchInput(placeholder string, items string) {
-	<label class="input input-bordered input-sm flex w-full items-center gap-2 bg-base-200 sm:w-64">
+	<label class="input input-sm flex w-full items-center gap-2 bg-base-200 sm:w-64">
 		@Icon("search", "h-4 w-4 opacity-50")
 		<input type="search" class="grow" placeholder={ placeholder } data-items={ items } oninput="const q = this.value.trim().toLowerCase(); document.querySelectorAll(this.dataset.items).forEach(el => el.hidden = !el.dataset.name.includes(q))"/>
 	</label>
