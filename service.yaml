@@ -1,0 +1,45 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: gather-your-party
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+        run.googleapis.com/cpu-throttling: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 60
+      serviceAccountName: cloud-run-deployer@softsrv-206519.iam.gserviceaccount.com
+      containers:
+        - image: __IMAGE__
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ENV_FILE_PATH
+              value: /etc/secrets/.env
+          resources:
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          volumeMounts:
+            - name: env-file
+              mountPath: /etc/secrets
+          startupProbe:
+            timeoutSeconds: 30
+            periodSeconds: 30
+            failureThreshold: 1
+            tcpSocket:
+              port: 8080
+      volumes:
+        - name: env-file
+          secret:
+            secretName: gather-your-party-env
+            items:
+              - key: latest
+                path: .env

@@ -39,16 +39,14 @@ templ:
 tw:
 	$(TAILWIND) -i ./static/css/input.css -o ./static/css/output.css
 
-# Create (or restart) the Postgres container. migrations/*.sql are applied by the
-# image's initdb hook only when the data volume is first created; run db-reset to
-# pick up new migrations.
+# Create (or restart) Postgres. The application applies and tracks migrations
+# on boot; do not pre-apply raw SQL via the image's initdb hook.
 db:
 	@if [ -z "$$(docker ps -aq -f name=^$(DB_CONTAINER)$$)" ]; then \
 		docker run -d --name $(DB_CONTAINER) \
 			-e POSTGRES_USER=$(DB_USER) -e POSTGRES_PASSWORD=$(DB_PASSWORD) -e POSTGRES_DB=$(DB_NAME) \
 			-p 127.0.0.1:$(DB_PORT):5432 \
 			-v $(DB_VOLUME):/var/lib/postgresql/data \
-			-v $(CURDIR)/migrations:/docker-entrypoint-initdb.d:ro \
 			postgres:16-alpine >/dev/null; \
 	else \
 		docker start $(DB_CONTAINER) >/dev/null; \
@@ -59,7 +57,7 @@ db:
 db-stop:
 	-docker stop $(DB_CONTAINER)
 
-# Delete the container and its data, then recreate it with all migrations applied.
+# Delete the container and its data, then recreate it empty for the next app boot.
 db-reset:
 	-docker rm -f $(DB_CONTAINER)
 	-docker volume rm $(DB_VOLUME)

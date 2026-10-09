@@ -6,11 +6,14 @@ Help your plan game nights with your friends.  Agree on a time, place, and game 
 
 Use Go 1.27.1 (the version in `go.mod`; newer Go toolchains download it automatically). Provision an externally hosted Postgres database (for example,
 Neon, Supabase, or Amazon RDS) before first use. The application does not provision
-a database or run migrations automatically.
+a database. On boot it verifies connectivity and applies embedded migrations in
+filename order before starting HTTP, tracking applied files in `schema_migrations`.
 
-Copy `.env.example` to `.env` and replace its placeholders, or export these
-variables in the process environment. Existing environment variables take
-precedence over `.env` values loaded by godotenv.
+Copy `.env.example` to `.env` and replace its placeholders, set `ENV_FILE_PATH` to
+another env file (such as `/etc/secrets/.env`), or export these variables in the
+process environment. Existing environment variables take precedence over file
+values loaded by godotenv. With no non-empty `ENV_FILE_PATH`, `.env` is loaded from
+the working directory; missing env files are optional.
 
 | Variable | Purpose |
 | --- | --- |
@@ -22,20 +25,23 @@ precedence over `.env` values loaded by godotenv.
 
 For example, set `DATABASE_URL` to
 `postgres://user:pass@host:5432/db?sslmode=require`. Use the TLS settings required
-by your provider; the application passes this URL unchanged to pgxpool. Pool
-creation is lazy: it does not guarantee connectivity until a query is made.
+by your provider; the application passes this URL unchanged to pgxpool and pings
+the pool before migrating. Connection or migration failures prevent serving.
 
-Before first use, export `DATABASE_URL` in your shell (`psql` does not load `.env`)
-and apply each migration in `migrations/` **once**, in order, from the repository root:
+Do not apply SQL manually on a new database: startup applies each unrecorded
+`migrations/*.sql` file and records its filename in the same transaction. Subsequent
+boots skip recorded files. Migration files are embedded at build time, so rebuild
+the binary when adding migrations. New migrations should contain transactional SQL
+without transaction-control statements; the runner also handles the existing
+files' outer `BEGIN;`/`COMMIT;` envelopes.
 
-```sh
-for f in migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
-```
-
-On an existing database, apply only the migrations it hasn't run yet (for example,
-`migrations/0003_drop_rejection_tallies.sql`, which removes the old invite-rejection
-limit's table). The local `make dev` database applies them automatically when first
-created; run `make db-reset` to rebuild it with new migrations.
+**Upgrading a database created before migration tracking:** the runner cannot infer
+which SQL files were applied manually. Back up the database, audit its schema, and
+baseline `schema_migrations` with only the filenames confirmed already applied
+before starting this version. Do not blindly mark all files applied. For disposable
+local data only, `make db-reset` deletes the old database; the next `make dev` boot
+creates its schema through the tracked runner. The dev database no longer uses the
+Postgres initdb hook to apply untracked SQL.
 
 The first migration creates users keyed by a unique SteamID64 and sessions with a
 user foreign key and expiry. `internal/db` exposes an upsert that requires a
