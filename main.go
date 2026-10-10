@@ -460,8 +460,9 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 	defer cancelGames()
 	sharedGames, gamesMessages, err := view.BuildSharedGames(gamesCtx, service, members)
 	if err != nil {
-		http.Error(w, "unable to load shared games", http.StatusInternalServerError)
-		return
+		fmt.Printf("shared games error: %s\n", err)
+		sharedGames = nil
+		gamesMessages = []string{"We could not load shared games right now. Please try again in a moment."}
 	}
 	roster := make([]component.PartyMember, 0, len(members))
 	isLeader := false
