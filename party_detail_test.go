@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,35 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 	}
 }
 
+const sharedGamesUnavailableMessage = "We could not load shared games right now. Please try again in a moment."
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// was written, so a server-side diagnostic can be asserted without leaking
+// into the HTTP response body.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %s", err)
+	}
+	os.Stdout = w
+	fn()
+	os.Stdout = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %s", err)
+	}
+	captured, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stdout: %s", err)
+	}
+	return string(captured)
+}
+
+// TestPartyDetailSharedGamesFailure proves a hard BuildSharedGames error
+// degrades the page instead of 500ing: the roster still renders, a generic
+// message replaces the games section, the underlying error is diagnosable
+// server-side via stdout, and the raw error never reaches the response body.
 func TestPartyDetailSharedGamesFailure(t *testing.T) {
 	old := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -180,9 +210,77 @@ func TestPartyDetailSharedGamesFailure(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = old })
 	app := application{store: &partyDetailStore{leaveStore: leaveStore{found: true}, member: true}, config: appConfig{SessionSecret: "leave-test-secret"}}
 	w := httptest.NewRecorder()
-	app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID, "", true))
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "unable to load shared games") || strings.Contains(w.Body.String(), "private Steam failure details") {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	stdout := captureStdout(t, func() {
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID, "", true))
+	})
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+	if !strings.Contains(body, `aria-label="Party members"`) || !strings.Contains(body, "Private Alyx") {
+		t.Fatalf("missing roster on degraded page: %s", body)
+	}
+	if !strings.Contains(body, sharedGamesUnavailableMessage) {
+		t.Fatalf("missing generic shared-games-unavailable message: %s", body)
+	}
+	if strings.Contains(body, "private Steam failure details") {
+		t.Fatalf("response body leaked the underlying Steam error: %s", body)
+	}
+	if !strings.Contains(stdout, "private Steam failure details") {
+		t.Fatalf("underlying error was not recorded server-side: stdout=%s", stdout)
+	}
+}
+
+// TestPartyDetailSharedGamesFailureLeaderControls proves the leader's
+// invite/step-down controls also render when only the shared-games
+// computation hard-fails; the GetFriendList/GetPlayerSummaries calls that
+// BuildInviteCandidates depends on still succeed.
+func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
+	const friendID = "76561198000000007"
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+			return nil, errors.New("private Steam failure details")
+		case strings.Contains(r.URL.Path, "/GetFriendList/"):
+			body := `{"friendslist":{"friends":[{"steamid":"` + friendID + `","relationship":"friend","friend_since":1}]}}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		case strings.Contains(r.URL.Path, "/GetPlayerSummaries/"):
+			body := `{"response":{"players":[{"steamid":"` + friendID + `","personaname":"Live friend"}]}}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		default:
+			t.Fatalf("unexpected Steam endpoint: %s", r.URL.Path)
+			return nil, errors.New("unexpected Steam endpoint")
+		}
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+	store := &partyDetailStore{
+		leaveStore: leaveStore{found: true, candidates: []db.InviteCandidate{{UserID: 89, Name: "Eligible friend"}}},
+		member:     true, leader: true,
+	}
+	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+	w := httptest.NewRecorder()
+	stdout := captureStdout(t, func() {
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID+"?user_id=7&steamID=forged&isLeader=true", "", true))
+	})
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+	if !strings.Contains(body, `aria-label="Party members"`) || !strings.Contains(body, "Private Alyx") {
+		t.Fatalf("missing roster on degraded page: %s", body)
+	}
+	if !strings.Contains(body, `aria-label="Invite friends"`) || !strings.Contains(body, `id="step-down-control"`) {
+		t.Fatalf("missing leader controls on degraded page: %s", body)
+	}
+	if !strings.Contains(body, sharedGamesUnavailableMessage) {
+		t.Fatalf("missing generic shared-games-unavailable message: %s", body)
+	}
+	if strings.Contains(body, "private Steam failure details") {
+		t.Fatalf("response body leaked the underlying Steam error: %s", body)
+	}
+	if !strings.Contains(stdout, "private Steam failure details") {
+		t.Fatalf("underlying error was not recorded server-side: stdout=%s", stdout)
 	}
 }
 
