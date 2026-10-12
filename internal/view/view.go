@@ -178,7 +178,9 @@ func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *ht
 		return err
 	})
 	fetches.Go(func() error {
-		games, sharedGamesErr = SteamService.SharedGames(newCtx, playerId, friendIDs...)
+		// Batched intersection + bounded-concurrency classification + owned-library
+		// join replaces the retired monolithic SharedGames call.
+		games, sharedGamesErr = sharedMultiplayerGames(newCtx, SteamService, playerId, friendIDs...)
 		// Preserve NoGamesError until the roster is available for its messages.
 		return nil
 	})
