@@ -16,14 +16,9 @@ import (
 )
 
 type partyGamesStub struct {
-	sharedAppIDs func(context.Context, string, ...string) ([]int, error)
 	gamesDetails func(context.Context, []int) ([]steamapi.GameDetail, error)
 	games        func(context.Context, string, bool, bool) ([]steamapi.Game, error)
 	count        func(context.Context, string) (int, error)
-}
-
-func (s partyGamesStub) SharedAppIDs(ctx context.Context, first string, rest ...string) ([]int, error) {
-	return s.sharedAppIDs(ctx, first, rest...)
 }
 
 func (s partyGamesStub) GamesDetails(ctx context.Context, appIDs []int) ([]steamapi.GameDetail, error) {
@@ -51,10 +46,20 @@ func allMultiplayer(_ context.Context, appIDs []int) ([]steamapi.GameDetail, err
 	return details, nil
 }
 
-// ownedLibrary is a Games stub that returns a known owned library.
+// ownedLibrary is a Games stub that returns the same known owned library for
+// every member, so the local intersection yields that library in caller order.
 func ownedLibrary(games []steamapi.Game) func(context.Context, string, bool, bool) ([]steamapi.Game, error) {
 	return func(context.Context, string, bool, bool) ([]steamapi.Game, error) {
 		return games, nil
+	}
+}
+
+// librariesFor is a Games stub that returns a per-member owned library, keyed by
+// Steam ID, so a test can drive the local intersection precisely (including
+// empty libraries that trigger NoGamesError).
+func librariesFor(byID map[string][]steamapi.Game) func(context.Context, string, bool, bool) ([]steamapi.Game, error) {
+	return func(_ context.Context, steamID string, _, _ bool) ([]steamapi.Game, error) {
+		return byID[steamID], nil
 	}
 }
 
@@ -75,14 +80,15 @@ func TestBuildSharedGamesConcurrentCountsPreservePairing(t *testing.T) {
 	}()
 	games := []steamapi.Game{{AppID: 42, Name: "First"}, {AppID: 7, Name: "Second"}}
 	service := partyGamesStub{
-		sharedAppIDs: func(_ context.Context, first string, rest ...string) ([]int, error) {
-			if first != "stored-leader" || !reflect.DeepEqual(rest, []string{"stored-member", "stored-third"}) {
-				t.Errorf("roster=%s %v", first, rest)
-			}
-			return []int{42, 7}, nil
-		},
 		gamesDetails: allMultiplayer,
-		games:        ownedLibrary(games),
+		games: func(_ context.Context, steamID string, _, _ bool) ([]steamapi.Game, error) {
+			switch steamID {
+			case "stored-leader", "stored-member", "stored-third":
+			default:
+				t.Errorf("unexpected library fetch for %q", steamID)
+			}
+			return games, nil
+		},
 		count: func(ctx context.Context, id string) (int, error) {
 			started <- id
 			select {
@@ -111,11 +117,13 @@ func TestBuildSharedGamesConcurrentCountsPreservePairing(t *testing.T) {
 }
 
 func TestBuildSharedGamesNoGamesNamesAndFallback(t *testing.T) {
-	service := partyGamesStub{sharedAppIDs: func(context.Context, string, ...string) ([]int, error) {
-		return nil, fmt.Errorf("wrapped: %w", &steamapi.NoGamesError{SteamIDs: []string{"named", "unnamed", "unknown"}})
-	}}
+	// Both members have empty/private libraries, so the local intersection
+	// raises NoGamesError naming every empty member in roster order; the name
+	// fallback uses the persona name when known ("Alyx") and the Steam ID
+	// otherwise ("unnamed").
+	service := partyGamesStub{games: librariesFor(map[string][]steamapi.Game{})}
 	games, messages, err := BuildSharedGames(context.Background(), service, []db.PartyMember{{SteamID64: "named", Name: "Alyx"}, {SteamID64: "unnamed"}})
-	want := []string{"Shared games cannot be computed.", "no games found for user Alyx. Their list may be private", "no games found for user unnamed. Their list may be private", "no games found for user unknown. Their list may be private"}
+	want := []string{"Shared games cannot be computed.", "no games found for user Alyx. Their list may be private", "no games found for user unnamed. Their list may be private"}
 	if err != nil || len(games) != 0 || !reflect.DeepEqual(messages, want) {
 		t.Fatalf("games=%v messages=%v err=%v", games, messages, err)
 	}
@@ -125,12 +133,24 @@ func TestBuildSharedGamesEmptyAndSoloRoster(t *testing.T) {
 	if games, messages, err := BuildSharedGames(context.Background(), partyGamesStub{}, nil); err != nil || len(games) != 0 || len(messages) != 0 {
 		t.Fatalf("empty roster: %v %v %v", games, messages, err)
 	}
-	service := partyGamesStub{sharedAppIDs: func(_ context.Context, first string, rest ...string) ([]int, error) {
-		if first != "solo" || len(rest) != 0 {
-			t.Errorf("solo roster=%s %v", first, rest)
-		}
-		return nil, nil
-	}}
+	// A solo roster owning a non-empty library intersects to that whole
+	// library, but none of the games classify as multiplayer, so no shared
+	// games and no messages result.
+	service := partyGamesStub{
+		games: func(_ context.Context, steamID string, _, _ bool) ([]steamapi.Game, error) {
+			if steamID != "solo" {
+				t.Errorf("solo roster fetched %q", steamID)
+			}
+			return []steamapi.Game{{AppID: 99}}, nil
+		},
+		gamesDetails: func(_ context.Context, ids []int) ([]steamapi.GameDetail, error) {
+			details := make([]steamapi.GameDetail, len(ids))
+			for i, id := range ids {
+				details[i] = steamapi.GameDetail{AppID: id, Multiplayer: false}
+			}
+			return details, nil
+		},
+	}
 	if games, messages, err := BuildSharedGames(context.Background(), service, []db.PartyMember{{SteamID64: "solo"}}); err != nil || len(games) != 0 || len(messages) != 0 {
 		t.Fatalf("empty intersection: %v %v %v", games, messages, err)
 	}
@@ -141,14 +161,13 @@ func TestBuildSharedGamesServiceErrors(t *testing.T) {
 	for _, countsFail := range []bool{false, true} {
 		t.Run(fmt.Sprintf("counts=%t", countsFail), func(t *testing.T) {
 			service := partyGamesStub{
-				sharedAppIDs: func(context.Context, string, ...string) ([]int, error) {
+				games: func(_ context.Context, _ string, _, _ bool) ([]steamapi.Game, error) {
 					if !countsFail {
 						return nil, failure
 					}
-					return []int{10}, nil
+					return []steamapi.Game{{AppID: 10}}, nil
 				},
 				gamesDetails: allMultiplayer,
-				games:        ownedLibrary([]steamapi.Game{{AppID: 10}}),
 				count:        func(context.Context, string) (int, error) { return 0, failure },
 			}
 			games, messages, err := BuildSharedGames(context.Background(), service, []db.PartyMember{{SteamID64: "solo"}})
@@ -184,9 +203,6 @@ func TestSharedMultiplayerGamesBoundedClassificationConcurrency(t *testing.T) {
 	release := make(chan struct{})
 
 	service := partyGamesStub{
-		sharedAppIDs: func(context.Context, string, ...string) ([]int, error) {
-			return appIDs, nil
-		},
 		gamesDetails: func(_ context.Context, ids []int) ([]steamapi.GameDetail, error) {
 			if len(ids) > 10 {
 				return nil, fmt.Errorf("batch too large: %d", len(ids))
@@ -254,9 +270,6 @@ func TestSharedMultiplayerGamesRichJoin(t *testing.T) {
 		{AppID: 30, Name: "Charlie", ImgIconURL: "charlie-icon"},
 	}
 	service := partyGamesStub{
-		sharedAppIDs: func(context.Context, string, ...string) ([]int, error) {
-			return []int{10, 20, 30}, nil
-		},
 		gamesDetails: func(_ context.Context, ids []int) ([]steamapi.GameDetail, error) {
 			details := make([]steamapi.GameDetail, len(ids))
 			for i, id := range ids {
@@ -281,5 +294,46 @@ func TestSharedMultiplayerGamesRichJoin(t *testing.T) {
 		if g.Name == "" || g.ImgIconURL == "" || g.AppID == 0 {
 			t.Fatalf("ID-only entry, missing rich fields: %+v", g)
 		}
+	}
+}
+
+// TestSharedMultiplayerGamesCallerFetchedOnce is the regression guard for the
+// redundant-second-caller-fetch bug: sharedMultiplayerGames must fetch the
+// caller's owned library EXACTLY ONCE and reuse it for both the intersection and
+// the rich join. If the fix is reverted to call Games(caller) a second time for
+// the rich join, callerFetchCount becomes 2 and this test goes RED.
+func TestSharedMultiplayerGamesCallerFetchedOnce(t *testing.T) {
+	owned := []steamapi.Game{
+		{AppID: 10, Name: "Alpha", ImgIconURL: "alpha-icon"},
+		{AppID: 20, Name: "Bravo", ImgIconURL: "bravo-icon"},
+	}
+	var mu sync.Mutex
+	fetchCounts := make(map[string]int)
+	service := partyGamesStub{
+		games: func(_ context.Context, steamID string, _, _ bool) ([]steamapi.Game, error) {
+			mu.Lock()
+			fetchCounts[steamID]++
+			mu.Unlock()
+			return owned, nil
+		},
+		gamesDetails: allMultiplayer,
+		count:        func(context.Context, string) (int, error) { return 0, nil },
+	}
+
+	games, err := sharedMultiplayerGames(context.Background(), service, "caller", "other")
+	if err != nil {
+		t.Fatalf("sharedMultiplayerGames err=%v", err)
+	}
+	// The join must still be rich (proving the single fetch was reused, not skipped).
+	if !reflect.DeepEqual(games, owned) {
+		t.Fatalf("rich join mismatch: got %+v want %+v", games, owned)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetchCounts["caller"] != 1 {
+		t.Fatalf("caller library fetched %d times, want exactly 1 (redundant second fetch regressed)", fetchCounts["caller"])
+	}
+	if fetchCounts["other"] != 1 {
+		t.Fatalf("other member library fetched %d times, want exactly 1", fetchCounts["other"])
 	}
 }

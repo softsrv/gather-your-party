@@ -22,7 +22,6 @@ const gamesDetailsBatchSize = 10
 const gamesDetailsMaxConcurrency = 10
 
 type sharedGamesService interface {
-	SharedAppIDs(context.Context, string, ...string) ([]int, error)
 	GamesDetails(context.Context, []int) ([]steamapi.GameDetail, error)
 	Games(context.Context, string, bool, bool) ([]steamapi.Game, error)
 	GetNumberOfCurrentPlayers(context.Context, string) (int, error)
@@ -30,16 +29,19 @@ type sharedGamesService interface {
 
 // sharedMultiplayerGames computes the shared MULTIPLAYER games for a caller and
 // the other Steam IDs, returning rich []steamapi.Game (Name/AppID/ImgIconURL
-// populated) in deterministic caller order. It:
+// populated) in deterministic caller order. It fetches each member's owned
+// library EXACTLY ONCE (the caller included), so the caller's rich library backs
+// both the intersection and the final join without a redundant second fetch. It:
 //
-//	a. intersects owned libraries via SharedAppIDs (propagating NoGamesError and
-//	   any other error unchanged),
+//	a. fetches every member's rich library once, concurrently, intersecting them
+//	   locally in caller-library order (propagating NoGamesError when any member
+//	   has an empty library, and any other error unchanged),
 //	b. classifies the intersecting app IDs as multiplayer via GamesDetails run in
 //	   bounded (<=10-wide, <=10 concurrent) waves, and
-//	c. joins the multiplayer app IDs back to the caller's owned library (fetched
-//	   once via Games) to carry Name/ImgIconURL.
+//	c. joins the multiplayer app IDs back to the caller's already-fetched owned
+//	   library to carry Name/ImgIconURL.
 func sharedMultiplayerGames(ctx context.Context, service sharedGamesService, caller string, others ...string) ([]steamapi.Game, error) {
-	appIDs, err := service.SharedAppIDs(ctx, caller, others...)
+	callerLibrary, appIDs, err := sharedAppIDs(ctx, service, caller, others...)
 	if err != nil {
 		return nil, err
 	}
@@ -55,16 +57,12 @@ func sharedMultiplayerGames(ctx context.Context, service sharedGamesService, cal
 		return nil, nil
 	}
 
-	owned, err := service.Games(ctx, caller, true, true)
-	if err != nil {
-		return nil, err
-	}
-	ownedByAppID := make(map[int]steamapi.Game, len(owned))
-	for _, game := range owned {
+	ownedByAppID := make(map[int]steamapi.Game, len(callerLibrary))
+	for _, game := range callerLibrary {
 		ownedByAppID[game.AppID] = game
 	}
 
-	// Preserve deterministic caller order from SharedAppIDs.
+	// Preserve deterministic caller order from sharedAppIDs.
 	games := make([]steamapi.Game, 0, len(multiplayer))
 	for _, appID := range appIDs {
 		if !multiplayer[appID] {
@@ -78,6 +76,66 @@ func sharedMultiplayerGames(ctx context.Context, service sharedGamesService, cal
 		games = append(games, steamapi.Game{AppID: appID})
 	}
 	return games, nil
+}
+
+// sharedAppIDs fetches each member's rich owned library exactly once
+// (concurrently) and returns the caller's library together with the app IDs
+// owned by EVERY member, in caller-library order. It mirrors the retired
+// steamapi.SharedAppIDs intersection semantics: it propagates a NoGamesError
+// naming every member whose library is empty/private, dedups each member's
+// library via a seen-map before counting, and yields the intersection in the
+// caller's library order. Returning the caller's library here lets the rich join
+// reuse it rather than fetching the caller a second time.
+func sharedAppIDs(ctx context.Context, service sharedGamesService, caller string, others ...string) ([]steamapi.Game, []int, error) {
+	steamIDs := append([]string{caller}, others...)
+	librariesByUser := make([][]steamapi.Game, len(steamIDs))
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	for i, steamID := range steamIDs {
+		group.Go(func() error {
+			library, err := service.Games(groupCtx, steamID, true, true)
+			if err != nil {
+				return err
+			}
+			// Each worker owns its slot; completion order cannot swap libraries.
+			librariesByUser[i] = library
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, nil, err
+	}
+
+	var emptySteamIDs []string
+	for i, library := range librariesByUser {
+		if len(library) == 0 {
+			emptySteamIDs = append(emptySteamIDs, steamIDs[i])
+		}
+	}
+	if len(emptySteamIDs) > 0 {
+		return nil, nil, &steamapi.NoGamesError{SteamIDs: emptySteamIDs}
+	}
+
+	ownedCounts := make(map[int]int)
+	for _, library := range librariesByUser {
+		seen := make(map[int]bool)
+		for _, game := range library {
+			if seen[game.AppID] {
+				continue
+			}
+			seen[game.AppID] = true
+			ownedCounts[game.AppID]++
+		}
+	}
+
+	callerLibrary := librariesByUser[0]
+	appIDs := make([]int, 0)
+	for _, game := range callerLibrary {
+		if ownedCounts[game.AppID] == len(librariesByUser) {
+			appIDs = append(appIDs, game.AppID)
+		}
+	}
+	return callerLibrary, appIDs, nil
 }
 
 // classifyMultiplayer chunks appIDs into <=10-wide batches and runs GamesDetails
