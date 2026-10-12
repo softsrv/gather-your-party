@@ -144,7 +144,8 @@ func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *ht
 	}
 	playerId := steamIDValue.(string)
 
-	deadline := time.Now().Add(5000 * time.Millisecond)
+	// TEMP: bumped 5s->30s as a diagnostic to confirm the serial Store-loop bottleneck; real fix is batched GamesDetails. See follow-up intent.
+	deadline := time.Now().Add(30000 * time.Millisecond)
 	newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
 	defer cancelCtx()
 
