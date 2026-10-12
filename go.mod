@@ -6,7 +6,7 @@ require (
 	github.com/a-h/templ v0.3.1070
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/joho/godotenv v1.5.1
-	github.com/softsrv/steamapi v1.0.2
+	github.com/softsrv/steamapi v1.2.0
 	golang.org/x/sync v0.24.0
 )
 
