@@ -180,7 +180,18 @@ func TestSharedGamesListHydratesConcurrently(t *testing.T) {
 			if friendsCalls.Load() != 1 || playersCalls.Load() != 1 {
 				t.Fatalf("friends=%d summaries=%d", friendsCalls.Load(), playersCalls.Load())
 			}
+			// The batched path (SharedAppIDs) fetches each roster member's owned
+			// library once to intersect. When the intersection succeeds the rich-game
+			// join (CLM-4) fetches the caller's (leader's) library a second time to
+			// carry Name/ImgIconURL — GameDetail carries no name/image — so leader
+			// appears twice. The join short-circuits only when SharedAppIDs itself
+			// errors or finds no shared library (games_error, both_errors, no_games);
+			// a players (summaries) error does not stop the shared-games intersection.
 			wantIDs := []string{"leader", "friend-2"}
+			switch scenario {
+			case "success", "players error":
+				wantIDs = []string{"leader", "leader", "friend-2"}
+			}
 			gamesMu.Lock()
 			gotIDs := slices.Clone(gameIDs)
 			gamesMu.Unlock()
