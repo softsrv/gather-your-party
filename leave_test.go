@@ -443,3 +443,25 @@ func TestSignedInHomeUsesStoredProfile(t *testing.T) {
 		}
 	}
 }
+
+// The retired library fragment is no longer routed: a signed-in request falls
+// through to the "GET /" handler's 404 and never reaches Steam.
+func TestRetiredGamesFragmentIsNotRouted(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected Steam request: %s", r.URL.Path)
+		return nil, errors.New("no network in tests")
+	})
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+	app := application{store: &leaveStore{found: true}, config: appConfig{SessionSecret: "leave-test-secret"}}
+	w := httptest.NewRecorder()
+	app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/frag/"+"games", "", true))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404, body: %s", w.Code, w.Body.String())
+	}
+	for _, listed := range []string{"game-list", "library-grid", "<li", "<img"} {
+		if strings.Contains(w.Body.String(), listed) {
+			t.Errorf("body lists games (%q): %s", listed, w.Body.String())
+		}
+	}
+}

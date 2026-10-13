@@ -393,3 +393,35 @@ func TestSignedOutHomeOffersSteamSignIn(t *testing.T) {
 		}
 	}
 }
+
+func TestSignedInHomeDropsLibrarySectionKeepsRest(t *testing.T) {
+	var html strings.Builder
+	if err := template.Home(steamapi.Player{PersonaName: "Alyx"}, "Gather Your Party", template.Main).Render(context.Background(), &html); err != nil {
+		t.Fatal(err)
+	}
+	output := html.String()
+	for _, forbidden := range []string{
+		"Your library",
+		"Everything in your Steam account, most played first.",
+		"Browse your library",
+		`id="library-heading"`,
+		`id="game-list"`,
+		`hx-get="/frag/` + `games"`,
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("signed-in home still contains %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"Welcome back, Alyx",
+		`href="/parties"`,
+		"Your parties",
+		"What can we all play?",
+		`id="find-games-heading"`,
+		`hx-get="/frag/friends"`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("signed-in home is missing %q", want)
+		}
+	}
+}

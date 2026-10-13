@@ -48,23 +48,6 @@ const rawFriends = `{"friendslist":{"friends":[{"steamid":"friend-1","relationsh
 const hydratedFriends = `{"response":{"players":[{"steamid":"friend-1","personaname":"Alyx","avatar":"https://example.com/alyx.jpg"},{"steamid":"friend-2","personaname":"Barney","avatar":"https://example.com/barney.jpg"}]}}`
 const ownedGame = `{"response":{"games":[{"appid":10,"name":"Shared adventure"}]}}`
 
-func TestGamesListIncludesAppInfoAndPlayedFreeGames(t *testing.T) {
-	calls := 0
-	mockRosterTransport(t, func(r *http.Request) (*http.Response, error) {
-		calls++
-		q := r.URL.Query()
-		if !strings.Contains(r.URL.Path, "/GetOwnedGames/") || q.Get("steamid") != "leader" || q.Get("include_appinfo") != "1" || q.Get("include_played_free_games") != "1" {
-			t.Errorf("unexpected games request: %s", r.URL.Path)
-		}
-		return rosterResponse(ownedGame)
-	})
-	w := httptest.NewRecorder()
-	GamesList(rosterContext(), w, httptest.NewRequest(http.MethodGet, "/frag/games", nil))
-	if calls != 1 || !strings.Contains(w.Body.String(), "Shared adventure") {
-		t.Fatalf("calls=%d body=%s", calls, w.Body.String())
-	}
-}
-
 func TestFriendsListHydratesOneBatch(t *testing.T) {
 	for _, failPlayers := range []bool{false, true} {
 		name := "success"

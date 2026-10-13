@@ -664,9 +664,6 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("GET /auth/steam", app.handleSteamLogin)
 	mux.HandleFunc("GET /auth/steam/callback", app.handleSteamCallback)
 	mux.HandleFunc("POST /auth/steam/logout", app.handleLogout)
-	mux.HandleFunc("GET /frag/games", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.GamesList, auth.LoadSteamId)
-	})
 	mux.HandleFunc("GET /frag/friends", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.FriendsList, auth.LoadSteamId)
 	})
