@@ -488,7 +488,7 @@ func newLoginFixture(t *testing.T, valid bool) *loginFixture {
 	t.Helper()
 	store, pool, ctx := inviteIntegrationStore(t)
 	openid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:%t\n", valid)
+		_, _ = fmt.Fprintf(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:%t\n", valid)
 	}))
 	t.Cleanup(openid.Close)
 	oldEndpoint := steamOpenIDEndpoint
