@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -405,6 +408,75 @@ func TestFetchMissingGameDataFailedBatchStoresNothing(t *testing.T) {
 	missing, _ := store.GamesMissingData(context.Background(), appIDs)
 	if !reflect.DeepEqual(missing, appIDs[:10]) {
 		t.Fatalf("missing=%v want first batch only", missing)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// was written, so a server-side diagnostic can be asserted.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %s", err)
+	}
+	os.Stdout = w
+	fn()
+	os.Stdout = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %s", err)
+	}
+	captured, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stdout: %s", err)
+	}
+	return string(captured)
+}
+
+// A panicking GamesDetails is that batch's error, not a process crash: the
+// panicking batch stores nothing and its sibling is still stored.
+func TestFetchMissingGameDataPanicIsBatchError(t *testing.T) {
+	store := newMemStore()
+	var library []db.StoredGame
+	var appIDs []int
+	for i := range 12 {
+		library = append(library, db.StoredGame{AppID: i + 1})
+		appIDs = append(appIDs, i+1)
+	}
+	store.addUser("u", db.GameSyncSynced, library...)
+	steam := steamStub{gamesDetails: func(c context.Context, ids []int) ([]steamapi.GameDetail, error) {
+		if slices.Contains(ids, 1) {
+			panic("details exploded")
+		}
+		return allMultiplayer(c, ids)
+	}}
+	var err error
+	out := captureStdout(t, func() {
+		err = FetchMissingGameData(context.Background(), steam, store, appIDs)
+	})
+	if err == nil || !strings.Contains(err.Error(), "panic: details exploded") || !strings.Contains(out, "details exploded") {
+		t.Fatalf("err=%v log=%q", err, out)
+	}
+	missing, _ := store.GamesMissingData(context.Background(), appIDs)
+	if !reflect.DeepEqual(missing, appIDs[:10]) {
+		t.Fatalf("missing=%v want panicking batch only", missing)
+	}
+}
+
+// A panic inside a request-path member sync goroutine is logged as that
+// member's failure; it does not end the process, and the caller still returns.
+func TestSyncMembersPanicIsContained(t *testing.T) {
+	store := newMemStore()
+	store.addUser("caller", db.GameSyncNeverSynced)
+	steam := steamStub{games: func(context.Context, string, bool, bool) ([]steamapi.Game, error) {
+		panic("games exploded")
+	}}
+	h := &SharedGamesList{Store: store, Steam: func() SteamService { return steam }}
+	out := captureStdout(t, func() {
+		h.syncMembers(context.Background(), steam, "caller", nil, nil)
+	})
+	if !strings.Contains(out, "shared games: sync games caller: panic: games exploded") {
+		t.Fatalf("log=%q", out)
 	}
 }
 

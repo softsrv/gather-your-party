@@ -120,6 +120,10 @@ func FetchMissingGameData(ctx context.Context, steam GameDetailsService, store G
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// A panic in this goroutine would end the process; it is this
+			// batch's failure instead, so no data is stored for its ids and a
+			// later call requests them again.
+			defer recoverToError(&errs[i], "fetch game data")
 			select {
 			case slots <- struct{}{}:
 			case <-ctx.Done():
@@ -133,6 +137,16 @@ func FetchMissingGameData(ctx context.Context, steam GameDetailsService, store G
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// recoverToError is deferred at the top of a goroutine: it turns a panic into
+// *dst (and logs it) so the panic cannot terminate the process, which a recover
+// in the spawning goroutine would not prevent.
+func recoverToError(dst *error, what string) {
+	if rec := recover(); rec != nil {
+		*dst = fmt.Errorf("%s: panic: %v", what, rec)
+		fmt.Printf("%s\n", *dst)
+	}
 }
 
 func fetchAndStoreBatch(ctx context.Context, steam GameDetailsService, store GameDataStore, batch []int) error {

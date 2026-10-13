@@ -415,6 +415,8 @@ type loginSteam struct {
 	// games answers owned-games requests; nil returns an empty library.
 	games      func(ctx context.Context, steamID string) ([]steamapi.Game, error)
 	gamesCalls []string
+	// gamesDetails overrides the default all-multiplayer GamesDetails answer.
+	gamesDetails func(ids []int) ([]steamapi.GameDetail, error)
 }
 
 func (s *loginSteam) Games(ctx context.Context, steamID string, _, _ bool) ([]steamapi.Game, error) {
@@ -429,6 +431,9 @@ func (s *loginSteam) Games(ctx context.Context, steamID string, _, _ bool) ([]st
 }
 
 func (s *loginSteam) GamesDetails(_ context.Context, ids []int) ([]steamapi.GameDetail, error) {
+	if s.gamesDetails != nil {
+		return s.gamesDetails(ids)
+	}
 	details := make([]steamapi.GameDetail, len(ids))
 	for i, id := range ids {
 		details[i] = steamapi.GameDetail{AppID: id, Multiplayer: true}
@@ -643,6 +648,37 @@ func TestLoginSyncFailuresAreContained(t *testing.T) {
 			t.Fatalf("sync err=%v log=%q", err, out)
 		}
 		// The process survived; a later request is served with the session.
+		r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(f.ctx)
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		f.app.routes().ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Login user") {
+			t.Fatalf("later request status=%d body=%s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("details panic", func(t *testing.T) {
+		f := newLoginFixture(t, true)
+		f.steam.games = func(context.Context, string) ([]steamapi.Game, error) {
+			return []steamapi.Game{{AppID: 440, Name: "Team Fortress 2"}}, nil
+		}
+		f.steam.gamesDetails = func([]int) ([]steamapi.GameDetail, error) {
+			panic("details double exploded")
+		}
+		var cookie *http.Cookie
+		var err error
+		out := captureStdout(t, func() {
+			cookie = f.assertSignedIn(t, f.callback(t))
+			err = f.waitSync(t)
+		})
+		// The panic ran in a batch goroutine, which no outer recover covers:
+		// it is that batch's error, logged, and the process survives.
+		if err == nil || !strings.Contains(err.Error(), "panic: details double exploded") || !strings.Contains(out, "details double exploded") || !strings.Contains(out, "login sync error") {
+			t.Fatalf("sync err=%v log=%q", err, out)
+		}
+		var stored bool
+		if err := f.pool.QueryRow(f.ctx, `SELECT EXISTS (SELECT 1 FROM games WHERE app_id = 440 AND has_data)`).Scan(&stored); err != nil || stored {
+			t.Fatalf("data stored for panicked batch: %t err=%v", stored, err)
+		}
 		r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(f.ctx)
 		r.AddCookie(cookie)
 		w := httptest.NewRecorder()

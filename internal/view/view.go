@@ -249,9 +249,16 @@ func (h *SharedGamesList) syncMembers(ctx context.Context, steam SteamService, c
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := SyncUserGames(ctx, steam, h.Store, userID, steamID); err != nil {
-				fmt.Printf("shared games: %s\n", err)
-			}
+			// A panic here would end the process (the request's recover does
+			// not cover this goroutine); log it like any other sync failure.
+			var err error
+			defer func() {
+				if err != nil {
+					fmt.Printf("shared games: %s\n", err)
+				}
+			}()
+			defer recoverToError(&err, fmt.Sprintf("sync games %s", steamID))
+			err = SyncUserGames(ctx, steam, h.Store, userID, steamID)
 		}()
 	}
 
