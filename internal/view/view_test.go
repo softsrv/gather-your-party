@@ -1,53 +1,38 @@
 package view
 
 import (
-	"errors"
+	"context"
 	"reflect"
 	"testing"
 
-	"github.com/softsrv/steamapi/steamapi"
+	"gather-your-party/internal/db"
 )
 
-func TestNoGamesMessagesUsesPersonaNamesFromRoster(t *testing.T) {
-	roster := []steamapi.Player{
-		{SteamID: "friend-1", PersonaName: "Alyx"},
-		{SteamID: "friend-2", PersonaName: "Barney"},
-	}
-
-	got := noGamesMessages([]string{"friend-1", "friend-2"}, roster)
+func TestStoredSharedGamesMessagesUseNamesWithSteamIDFallback(t *testing.T) {
+	store := newMemStore()
+	store.addUser("caller", db.GameSyncSynced, stored(1, "A", true))
+	store.addUser("friend-1", db.GameSyncPrivateOrNoGames)
+	store.addUser("friend-2", db.GameSyncNeverSynced)
+	names := map[string]string{"friend-1": "Alyx"}
+	games, got, err := storedSharedGames(context.Background(), context.Background(), steamStub{}, store, "caller", []string{"friend-1", "friend-2", "missing"}, names)
 	want := []string{
 		"no games found for user Alyx. Their list may be private",
-		"no games found for user Barney. Their list may be private",
+		"games not synced yet for user friend-2",
+		"games not synced yet for user missing",
 	}
-
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("noGamesMessages() = %#v, want %#v", got, want)
-	}
-}
-
-func TestNoGamesMessagesFallsBackToSteamID(t *testing.T) {
-	got := noGamesMessages([]string{"unknown-id"}, []steamapi.Player{{SteamID: "friend-1", PersonaName: "Alyx"}})
-	want := []string{"no games found for user unknown-id. Their list may be private"}
-
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("noGamesMessages() = %#v, want %#v", got, want)
+	if err != nil || games != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("games=%v messages=%#v err=%v", games, got, err)
 	}
 }
 
-func TestSharedGamesNoGamesMessagesOnlyHandlesNoGamesError(t *testing.T) {
-	roster := []steamapi.Player{{SteamID: "friend-1", PersonaName: "Alyx"}}
-
-	got, ok := sharedGamesNoGamesMessages(&steamapi.NoGamesError{SteamIDs: []string{"friend-1"}}, roster)
-	if !ok {
-		t.Fatal("sharedGamesNoGamesMessages() ok = false, want true for NoGamesError")
-	}
-	want := []string{"no games found for user Alyx. Their list may be private"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("sharedGamesNoGamesMessages() = %#v, want %#v", got, want)
-	}
-
-	got, ok = sharedGamesNoGamesMessages(errors.New("plain steamapi error"), roster)
-	if ok {
-		t.Fatalf("sharedGamesNoGamesMessages() ok = true, want false for plain error with messages %#v", got)
+func TestStoredSharedGamesOmitsFailedFetchWithoutError(t *testing.T) {
+	store := newMemStore()
+	library := []db.StoredGame{stored(1, "Stored", true), {AppID: 2, Name: "Unfetched"}}
+	store.addUser("caller", db.GameSyncSynced, library...)
+	store.addUser("friend", db.GameSyncSynced, library...)
+	steam := steamStub{} // GamesDetails errors
+	games, messages, err := storedSharedGames(context.Background(), context.Background(), steam, store, "caller", []string{"friend"}, nil)
+	if err != nil || len(messages) != 0 || len(games) != 1 || games[0].AppID != 1 {
+		t.Fatalf("games=%v messages=%v err=%v", games, messages, err)
 	}
 }

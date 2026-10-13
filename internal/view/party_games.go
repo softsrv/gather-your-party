@@ -12,199 +12,125 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// gamesDetailsBatchSize is the maximum number of app IDs GamesDetails accepts
-// per call (the batched steamapi endpoint errors above this).
-const gamesDetailsBatchSize = 10
+// notSyncedMessageFormat names a member whose library has never been synced,
+// so the shared result cannot include them.
+const notSyncedMessageFormat = "games not synced yet for user %s"
 
-// gamesDetailsMaxConcurrency bounds the number of GamesDetails waves in flight
-// at once so classification runs as bounded concurrent waves rather than a
-// serial per-game loop or an unbounded fan-out.
-const gamesDetailsMaxConcurrency = 10
+// SharedGamesStore is the store surface the shared-games builders read.
+type SharedGamesStore interface {
+	GameDataStore
+	GameSyncStates(context.Context, []string) (map[string]db.GameSyncState, error)
+	SharedStoredGames(context.Context, string, []string) ([]db.StoredGame, error)
+}
 
-type sharedGamesService interface {
-	GamesDetails(context.Context, []int) ([]steamapi.GameDetail, error)
-	Games(context.Context, string, bool, bool) ([]steamapi.Game, error)
+// PartyGamesService is the Steam surface the party page uses: game data for
+// shared games without stored data, and live player counts.
+type PartyGamesService interface {
+	GameDetailsService
 	GetNumberOfCurrentPlayers(context.Context, string) (int, error)
 }
 
-// sharedMultiplayerGames computes the shared MULTIPLAYER games for a caller and
-// the other Steam IDs, returning rich []steamapi.Game (Name/AppID/ImgIconURL
-// populated) in deterministic caller order. It fetches each member's owned
-// library EXACTLY ONCE (the caller included), so the caller's rich library backs
-// both the intersection and the final join without a redundant second fetch. It:
-//
-//	a. fetches every member's rich library once, concurrently, intersecting them
-//	   locally in caller-library order (propagating NoGamesError when any member
-//	   has an empty library, and any other error unchanged),
-//	b. classifies the intersecting app IDs as multiplayer via GamesDetails run in
-//	   bounded (<=10-wide, <=10 concurrent) waves, and
-//	c. joins the multiplayer app IDs back to the caller's already-fetched owned
-//	   library to carry Name/ImgIconURL.
-func sharedMultiplayerGames(ctx context.Context, service sharedGamesService, caller string, others ...string) ([]steamapi.Game, error) {
-	callerLibrary, appIDs, err := sharedAppIDs(ctx, service, caller, others...)
+// storedSharedGames builds the shared multiplayer games of caller and others
+// from stored libraries and stored game data. A member in private_or_no_games
+// gets the no-games message and a member never synced (or unknown) gets the
+// not-synced message; when any member has a message the shared result cannot
+// be computed and only the messages are returned. Otherwise GamesDetails is
+// requested (under fetchCtx) only for shared games with no stored data; a game
+// still without data afterwards is left out without an error. Store reads use
+// ctx. The result holds only multiplayer games, in caller library order, with
+// the stored name and icon.
+func storedSharedGames(ctx, fetchCtx context.Context, steam GameDetailsService, store SharedGamesStore, caller string, others []string, names map[string]string) ([]steamapi.Game, []string, error) {
+	members := uniqueMembers(caller, others)
+	states, err := store.GameSyncStates(ctx, members)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("shared games: sync states: %w", err)
 	}
-	if len(appIDs) == 0 {
-		return nil, nil
+	var messages []string
+	for _, steamID := range members {
+		name := names[steamID]
+		if name == "" {
+			name = steamID
+		}
+		state, ok := states[steamID]
+		switch {
+		case !ok || state.State == db.GameSyncNeverSynced:
+			messages = append(messages, fmt.Sprintf(notSyncedMessageFormat, name))
+		case state.State == db.GameSyncPrivateOrNoGames:
+			messages = append(messages, fmt.Sprintf(noGamesMessageFormat, name))
+		}
+	}
+	if len(messages) > 0 {
+		return nil, messages, nil
 	}
 
-	multiplayer, err := classifyMultiplayer(ctx, service, appIDs)
+	shared, err := store.SharedStoredGames(ctx, caller, members[1:])
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("shared games: %w", err)
 	}
-	if len(multiplayer) == 0 {
-		return nil, nil
-	}
-
-	ownedByAppID := make(map[int]steamapi.Game, len(callerLibrary))
-	for _, game := range callerLibrary {
-		ownedByAppID[game.AppID] = game
-	}
-
-	// Preserve deterministic caller order from sharedAppIDs.
-	games := make([]steamapi.Game, 0, len(multiplayer))
-	for _, appID := range appIDs {
-		if !multiplayer[appID] {
-			continue
+	var missing []int
+	for _, game := range shared {
+		if !game.DataFetched {
+			missing = append(missing, game.AppID)
 		}
-		if game, ok := ownedByAppID[appID]; ok {
-			games = append(games, game)
-			continue
-		}
-		// The caller owns every intersecting app ID, so this is defensive only.
-		games = append(games, steamapi.Game{AppID: appID})
 	}
-	return games, nil
+	if len(missing) > 0 {
+		// A failed fetch leaves those games without data; they are omitted below.
+		if err := FetchMissingGameData(fetchCtx, steam, store, missing); err != nil {
+			fmt.Printf("shared games: fetch game data: %s\n", err)
+		}
+		if shared, err = store.SharedStoredGames(ctx, caller, members[1:]); err != nil {
+			return nil, nil, fmt.Errorf("shared games: %w", err)
+		}
+	}
+	games := make([]steamapi.Game, 0, len(shared))
+	for _, game := range shared {
+		if game.DataFetched && game.Multiplayer {
+			games = append(games, steamapi.Game{AppID: game.AppID, Name: game.Name, ImgIconURL: game.ImgIconURL})
+		}
+	}
+	return games, nil, nil
 }
 
-// sharedAppIDs fetches each member's rich owned library exactly once
-// (concurrently) and returns the caller's library together with the app IDs
-// owned by EVERY member, in caller-library order. It mirrors the retired
-// steamapi.SharedAppIDs intersection semantics: it propagates a NoGamesError
-// naming every member whose library is empty/private, dedups each member's
-// library via a seen-map before counting, and yields the intersection in the
-// caller's library order. Returning the caller's library here lets the rich join
-// reuse it rather than fetching the caller a second time.
-func sharedAppIDs(ctx context.Context, service sharedGamesService, caller string, others ...string) ([]steamapi.Game, []int, error) {
-	steamIDs := append([]string{caller}, others...)
-	librariesByUser := make([][]steamapi.Game, len(steamIDs))
-
-	group, groupCtx := errgroup.WithContext(ctx)
-	for i, steamID := range steamIDs {
-		group.Go(func() error {
-			library, err := service.Games(groupCtx, steamID, true, true)
-			if err != nil {
-				return err
-			}
-			// Each worker owns its slot; completion order cannot swap libraries.
-			librariesByUser[i] = library
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return nil, nil, err
-	}
-
-	var emptySteamIDs []string
-	for i, library := range librariesByUser {
-		if len(library) == 0 {
-			emptySteamIDs = append(emptySteamIDs, steamIDs[i])
+// uniqueMembers returns caller followed by the distinct other ids.
+func uniqueMembers(caller string, others []string) []string {
+	members := []string{caller}
+	seen := map[string]bool{caller: true}
+	for _, id := range others {
+		if !seen[id] {
+			seen[id] = true
+			members = append(members, id)
 		}
 	}
-	if len(emptySteamIDs) > 0 {
-		return nil, nil, &steamapi.NoGamesError{SteamIDs: emptySteamIDs}
-	}
-
-	ownedCounts := make(map[int]int)
-	for _, library := range librariesByUser {
-		seen := make(map[int]bool)
-		for _, game := range library {
-			if seen[game.AppID] {
-				continue
-			}
-			seen[game.AppID] = true
-			ownedCounts[game.AppID]++
-		}
-	}
-
-	callerLibrary := librariesByUser[0]
-	appIDs := make([]int, 0)
-	for _, game := range callerLibrary {
-		if ownedCounts[game.AppID] == len(librariesByUser) {
-			appIDs = append(appIDs, game.AppID)
-		}
-	}
-	return callerLibrary, appIDs, nil
+	return members
 }
 
-// classifyMultiplayer chunks appIDs into <=10-wide batches and runs GamesDetails
-// on each chunk with bounded concurrency (<=10 waves in flight), returning the
-// set of app IDs whose GameDetail.Multiplayer is true.
-func classifyMultiplayer(ctx context.Context, service sharedGamesService, appIDs []int) (map[int]bool, error) {
-	chunks := make([][]int, 0, (len(appIDs)+gamesDetailsBatchSize-1)/gamesDetailsBatchSize)
-	for start := 0; start < len(appIDs); start += gamesDetailsBatchSize {
-		end := start + gamesDetailsBatchSize
-		if end > len(appIDs) {
-			end = len(appIDs)
-		}
-		chunks = append(chunks, appIDs[start:end])
-	}
-
-	results := make([][]steamapi.GameDetail, len(chunks))
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(gamesDetailsMaxConcurrency)
-	for i, chunk := range chunks {
-		group.Go(func() error {
-			details, err := service.GamesDetails(groupCtx, chunk)
-			if err != nil {
-				return fmt.Errorf("party shared games: classify: %w", err)
-			}
-			// Each worker owns its slot; completion order cannot swap results.
-			results[i] = details
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return nil, err
-	}
-
-	multiplayer := make(map[int]bool)
-	for _, details := range results {
-		for _, detail := range details {
-			if detail.Multiplayer {
-				multiplayer[detail.AppID] = true
-			}
-		}
-	}
-	return multiplayer, nil
-}
-
-// BuildSharedGames uses only the database-loaded roster to build the party's
-// shared games and live counts. A private/empty library becomes a named message;
-// other service failures are returned to the caller without partial counts.
-func BuildSharedGames(ctx context.Context, service sharedGamesService, members []db.PartyMember) ([]component.SharedGameCount, []string, error) {
+// BuildSharedGames builds the party's shared games from the stored libraries of
+// the database-loaded roster, without syncing any member, and fetches a live
+// player count for each shared game. A member who is private or not yet synced
+// becomes a named message; store and player-count failures are returned to the
+// caller without partial counts.
+func BuildSharedGames(ctx context.Context, steam PartyGamesService, store SharedGamesStore, members []db.PartyMember) ([]component.SharedGameCount, []string, error) {
 	if len(members) == 0 {
 		return nil, nil, nil
 	}
 	ids := make([]string, len(members))
-	roster := make([]steamapi.Player, len(members))
+	names := make(map[string]string, len(members))
 	for i, member := range members {
 		ids[i] = member.SteamID64
-		roster[i] = steamapi.Player{SteamID: member.SteamID64, PersonaName: member.Name}
+		names[member.SteamID64] = member.Name
 	}
-	games, err := sharedMultiplayerGames(ctx, service, ids[0], ids[1:]...)
+	games, messages, err := storedSharedGames(ctx, ctx, steam, store, ids[0], ids[1:], names)
 	if err != nil {
-		if messages, ok := sharedGamesNoGamesMessages(err, roster); ok {
-			return nil, append([]string{"Shared games cannot be computed."}, messages...), nil
-		}
 		return nil, nil, fmt.Errorf("party shared games: %w", err)
+	}
+	if len(messages) > 0 {
+		return nil, append([]string{"Shared games cannot be computed."}, messages...), nil
 	}
 	counts := make([]component.SharedGameCount, len(games))
 	fetches, countCtx := errgroup.WithContext(ctx)
 	for i, game := range games {
 		fetches.Go(func() error {
-			count, err := service.GetNumberOfCurrentPlayers(countCtx, strconv.Itoa(game.AppID))
+			count, err := steam.GetNumberOfCurrentPlayers(countCtx, strconv.Itoa(game.AppID))
 			if err != nil {
 				return fmt.Errorf("party shared games: player count: %w", err)
 			}

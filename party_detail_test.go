@@ -208,7 +208,9 @@ func TestPartyDetailSharedGamesFailure(t *testing.T) {
 		return nil, errors.New("private Steam failure details")
 	})
 	t.Cleanup(func() { http.DefaultTransport = old })
-	app := application{store: &partyDetailStore{leaveStore: leaveStore{found: true}, member: true}, config: appConfig{SessionSecret: "leave-test-secret"}}
+	store := &partyDetailStore{leaveStore: leaveStore{found: true}, member: true}
+	store.syncedGames = []db.StoredGame{{AppID: 10, Name: "Stored", DataFetched: true, HasData: true, Multiplayer: true}}
+	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
 	w := httptest.NewRecorder()
 	stdout := captureStdout(t, func() {
 		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID, "", true))
@@ -240,7 +242,7 @@ func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
 	old := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
+		case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/v0001"):
 			return nil, errors.New("private Steam failure details")
 		case strings.Contains(r.URL.Path, "/GetFriendList/"):
 			body := `{"friendslist":{"friends":[{"steamid":"` + friendID + `","relationship":"friend","friend_since":1}]}}`
@@ -258,6 +260,7 @@ func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
 		leaveStore: leaveStore{found: true, candidates: []db.InviteCandidate{{UserID: 89, Name: "Eligible friend"}}},
 		member:     true, leader: true,
 	}
+	store.syncedGames = []db.StoredGame{{AppID: 10, Name: "Stored", DataFetched: true, HasData: true, Multiplayer: true}}
 	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
 	w := httptest.NewRecorder()
 	stdout := captureStdout(t, func() {

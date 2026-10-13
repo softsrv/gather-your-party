@@ -57,11 +57,44 @@ type sessionStore interface {
 	AcceptInvite(context.Context, string, int64) error
 	RejectInvite(context.Context, string, int64) error
 	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
+	view.SharedGamesListStore
 }
 
 type application struct {
 	store  sessionStore
 	config appConfig
+	// steam returns the Steam client for one request; nil uses steamClient.
+	steam func() view.SteamService
+	// sharedGamesSyncBudget overrides the Get shared games sync budget when
+	// positive.
+	sharedGamesSyncBudget time.Duration
+	// startLoginSync starts the background login sync for a user who just
+	// signed in; nil uses launchLoginSync.
+	startLoginSync func(userID int64, steamID64 string)
+	// loginSyncTimeout overrides defaultLoginSyncTimeout when positive.
+	loginSyncTimeout time.Duration
+	// loginSyncDone, when set, is called with the outcome of every login sync,
+	// after any panic has been recovered.
+	loginSyncDone func(steamID64 string, err error)
+}
+
+// defaultLoginSyncTimeout is the login sync's own deadline. The sync outlives
+// the callback request, so it never inherits the request's context.
+const defaultLoginSyncTimeout = 60 * time.Second
+
+// steamPlayersBatchSize is the most steam ids GetPlayerSummaries accepts per call.
+const steamPlayersBatchSize = 100
+
+// steamClient builds the production Steam client from STEAM_API_KEY.
+func steamClient() view.SteamService {
+	return steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+}
+
+func (app *application) steamService() func() view.SteamService {
+	if app.steam != nil {
+		return app.steam
+	}
+	return steamClient
 }
 
 //go:embed migrations/*.sql
@@ -251,12 +284,13 @@ func (app *application) handleSteamCallback(w http.ResponseWriter, r *http.Reque
 		reject()
 		return
 	}
-	client := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	player, err := client.Player(ctx, verifiedSteamID64)
-	if err != nil {
+	steam := app.steamService()()
+	players, err := steam.Players(ctx, []string{verifiedSteamID64})
+	if err != nil || len(players) == 0 {
 		reject()
 		return
 	}
+	player := players[0]
 	userID, err := app.store.UpsertUser(ctx, verifiedSteamID64, player)
 	if err != nil {
 		reject()
@@ -278,7 +312,88 @@ func (app *application) handleSteamCallback(w http.ResponseWriter, r *http.Reque
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
 	})
+	start := app.startLoginSync
+	if start == nil {
+		start = app.launchLoginSync
+	}
+	start(userID, verifiedSteamID64)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// launchLoginSync runs the login sync in its own goroutine and returns at once,
+// so sign-in never waits on Steam.
+func (app *application) launchLoginSync(userID int64, steamID64 string) {
+	go app.runLoginSync(userID, steamID64)
+}
+
+// runLoginSync runs one login sync under its own deadline, detached from any
+// request. Errors and panics are logged; nothing here touches a response.
+func (app *application) runLoginSync(userID int64, steamID64 string) {
+	var err error
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("login sync %s: panic: %v", steamID64, rec)
+		}
+		if err != nil {
+			fmt.Printf("login sync error: %s\n", err)
+		}
+		if app.loginSyncDone != nil {
+			app.loginSyncDone(steamID64, err)
+		}
+	}()
+	timeout := app.loginSyncTimeout
+	if timeout <= 0 {
+		timeout = defaultLoginSyncTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err = app.syncLogin(ctx, app.steamService()(), userID, steamID64)
+}
+
+// syncLogin creates or refreshes a users row for every Steam friend of the
+// user, then syncs the user's own library. Friends' libraries are never
+// fetched here. A friends failure does not stop the library sync.
+func (app *application) syncLogin(ctx context.Context, steam view.SteamService, userID int64, steamID64 string) error {
+	friendsErr := syncLoginFriends(ctx, steam, app.store, steamID64)
+	gamesErr := view.SyncUserGames(ctx, steam, app.store, userID, steamID64)
+	return errors.Join(friendsErr, gamesErr)
+}
+
+// syncLoginFriends upserts each friend's profile from Players summaries.
+// UpsertFriend leaves ever_logged_in false for new rows and unchanged for
+// existing ones.
+func syncLoginFriends(ctx context.Context, steam view.SteamService, store sessionStore, steamID64 string) error {
+	friends, err := steam.Friends(ctx, steamID64)
+	if err != nil {
+		return fmt.Errorf("login sync friends %s: %w", steamID64, err)
+	}
+	isFriend := make(map[string]bool, len(friends))
+	ids := make([]string, 0, len(friends))
+	for _, friend := range friends {
+		if friend.SteamID == "" || friend.SteamID == steamID64 || isFriend[friend.SteamID] {
+			continue
+		}
+		isFriend[friend.SteamID] = true
+		ids = append(ids, friend.SteamID)
+	}
+	var errs []error
+	for start := 0; start < len(ids); start += steamPlayersBatchSize {
+		batch := ids[start:min(start+steamPlayersBatchSize, len(ids))]
+		players, err := steam.Players(ctx, batch)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("login sync friend profiles %s: %w", steamID64, err))
+			continue
+		}
+		for _, player := range players {
+			if !isFriend[player.SteamID] {
+				continue
+			}
+			if _, err := store.UpsertFriend(ctx, player.SteamID, player); err != nil {
+				errs = append(errs, fmt.Errorf("login sync friend %s: %w", player.SteamID, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (app *application) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -455,10 +570,10 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 		http.Error(w, "unable to load party members", http.StatusInternalServerError)
 		return
 	}
-	service := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+	service := app.steamService()()
 	gamesCtx, cancelGames := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancelGames()
-	sharedGames, gamesMessages, err := view.BuildSharedGames(gamesCtx, service, members)
+	sharedGames, gamesMessages, err := view.BuildSharedGames(gamesCtx, service, app.store, members)
 	if err != nil {
 		fmt.Printf("shared games error: %s\n", err)
 		sharedGames = nil
@@ -484,7 +599,7 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 	var inviteCandidates []component.InviteCandidate
 	var stepDownCandidates []component.StepDownCandidate
 	if isLeader {
-		service := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+		service := app.steamService()()
 		deadline := time.Now().Add(5000 * time.Millisecond)
 		newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
 		defer cancelCtx()
@@ -670,8 +785,12 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("GET /frag/friends", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.FriendsList, auth.LoadSteamId)
 	})
+	sharedGames := view.NewSharedGamesList(app.store, app.steamService())
+	if app.sharedGamesSyncBudget > 0 {
+		sharedGames.SyncBudget = app.sharedGamesSyncBudget
+	}
 	mux.HandleFunc("POST /frag/shared-games", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, view.SharedGamesList, auth.LoadSteamId)
+		middleware.Chain(w, r, sharedGames.Serve, auth.LoadSteamId)
 	})
 
 	mux.HandleFunc("GET /parties", func(w http.ResponseWriter, r *http.Request) {
