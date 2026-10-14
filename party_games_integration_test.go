@@ -17,11 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"gather-your-party/internal/db"
+
 	"github.com/softsrv/steamapi/steamapi"
 )
 
 // CLM-1/3/6: real session, membership query, Steam client and rendered page;
 // only Steam's HTTP boundary is substituted. TestMain supplies real Postgres.
+// Libraries and game data come from the store: the page syncs nobody.
 func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -69,6 +72,24 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 			}
 			if tc.private {
 				libraries[steamIDs[2]] = nil
+			}
+			for i, steamID := range steamIDs {
+				if len(libraries[steamID]) == 0 {
+					if _, err := store.RecordEmptyLibrary(ctx, users[i]); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
+				if err := store.StoreUserLibrary(ctx, users[i], libraries[steamID]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			allData := make([]db.GameData, len(games))
+			for i, game := range games {
+				allData[i] = db.GameData{AppID: game.AppID, HasData: true, Multiplayer: true}
+			}
+			if err := store.StoreGameData(ctx, allData); err != nil {
+				t.Fatal(err)
 			}
 			counts := map[string]int{"10": 137, "20": 9042}
 			var mu sync.Mutex
@@ -123,7 +144,8 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 						return nil, fmt.Errorf("unexpected Steam endpoint %s", r.URL.Path)
 					}
 				case r.URL.Host == "store.steampowered.com" && r.URL.Path == "/api/appdetails":
-					body = fmt.Sprintf(`{%q:{"success":true,"data":{"categories":[{"id":1,"description":"Multi-player"}]}}}`, r.URL.Query().Get("appids"))
+					t.Errorf("game details requested although every game's data is stored")
+					return nil, fmt.Errorf("unexpected details request")
 				default:
 					return nil, fmt.Errorf("unexpected Steam URL %s", r.URL.Host+r.URL.Path)
 				}
@@ -139,10 +161,8 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 			if w.Code != http.StatusOK || !strings.Contains(body, "<title>Party details</title>") {
 				t.Fatalf("status=%d body=%s", w.Code, body)
 			}
-			for _, id := range steamIDs {
-				if ownedCalls[id] != 1 {
-					t.Errorf("library calls for %s=%d want=1", id, ownedCalls[id])
-				}
+			if len(ownedCalls) != 0 {
+				t.Errorf("party page synced libraries: %v", ownedCalls)
 			}
 			if tc.private {
 				name := tc.privateName

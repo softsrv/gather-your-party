@@ -10,11 +10,13 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
+
+	"github.com/softsrv/steamapi/steamapi"
 )
 
 type rosterTransport func(*http.Request) (*http.Response, error)
@@ -112,103 +114,79 @@ func TestFriendsListHydratesOneBatch(t *testing.T) {
 	}
 }
 
-func TestSharedGamesListHydratesConcurrently(t *testing.T) {
-	for _, scenario := range []string{"success", "no games", "players error", "games error", "both errors"} {
-		t.Run(scenario, func(t *testing.T) {
-			playersStarted, gamesStarted := make(chan struct{}), make(chan struct{})
-			var playersOnce, gamesOnce sync.Once
-			var friendsCalls, playersCalls atomic.Int32
-			var gamesMu sync.Mutex
-			var gameIDs []string
-			mockRosterTransport(t, func(r *http.Request) (*http.Response, error) {
-				switch {
-				case strings.Contains(r.URL.Path, "/GetFriendList/"):
-					friendsCalls.Add(1)
-					return rosterResponse(rawFriends)
-				case strings.Contains(r.URL.Path, "/GetPlayerSummaries/"):
-					playersCalls.Add(1)
-					if r.URL.Query().Get("steamids") != "friend-1,friend-2" {
-						t.Error("hydration must include unselected friends too")
-					}
-					playersOnce.Do(func() { close(playersStarted) })
-					// Neither fetch may complete until the other has started.
-					select {
-					case <-gamesStarted:
-					case <-r.Context().Done():
-						t.Error("games fetch did not overlap hydration")
-						return nil, r.Context().Err()
-					}
-					if scenario == "players error" || scenario == "both errors" {
-						return nil, errors.New("summaries unavailable")
-					}
-					return rosterResponse(hydratedFriends)
-				case strings.Contains(r.URL.Path, "/GetOwnedGames/"):
-					id := r.URL.Query().Get("steamid")
-					gamesMu.Lock()
-					gameIDs = append(gameIDs, id)
-					gamesMu.Unlock()
-					gamesOnce.Do(func() { close(gamesStarted) })
-					select {
-					case <-playersStarted:
-					case <-r.Context().Done():
-						// SharedGames cancels sibling fetches when one fails, so both cases can be
-						// ready at once and select picks randomly. Only fail if hydration never started.
-						select {
-						case <-playersStarted:
-						default:
-							t.Error("hydration did not overlap games fetch")
-						}
-						return nil, r.Context().Err()
-					}
-					if scenario == "games error" || scenario == "both errors" {
-						return nil, errors.New("games unavailable")
-					}
-					if scenario == "no games" && id == "friend-2" {
-						return rosterResponse(`{"response":{"games":[]}}`)
-					}
-					return rosterResponse(ownedGame)
-				case r.URL.Host == "store.steampowered.com" && r.URL.Path == "/api/appdetails" && r.URL.Query().Get("appids") == "10":
-					return rosterResponse(`{"10":{"success":true,"data":{"categories":[{"id":1,"description":"Multi-player"}]}}}`)
-				default:
-					return nil, errors.New("unexpected Steam endpoint")
-				}
-			})
-			r := httptest.NewRequest(http.MethodPost, "/frag/shared-games", strings.NewReader("friendID=friend-2"))
-			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			w := httptest.NewRecorder()
-			SharedGamesList(rosterContext(), w, r)
-			if friendsCalls.Load() != 1 || playersCalls.Load() != 1 {
-				t.Fatalf("friends=%d summaries=%d", friendsCalls.Load(), playersCalls.Load())
+func sharedGamesRequest(form string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/frag/shared-games", strings.NewReader(form))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return r
+}
+
+func TestSharedGamesListUnauthenticatedRendersSignin(t *testing.T) {
+	h := NewSharedGamesList(newMemStore(), func() SteamService { t.Fatal("Steam used without a session"); return nil })
+	w := httptest.NewRecorder()
+	h.Serve(&middleware.CustomContext{Context: context.Background()}, w, sharedGamesRequest(""))
+	if !strings.Contains(w.Body.String(), "Gather Your Party") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+}
+
+func TestSharedGamesListSyncsCallerAndNeverSyncedFriend(t *testing.T) {
+	store := newMemStore()
+	store.addUser("leader", db.GameSyncSynced)
+	var mu sync.Mutex
+	var gameIDs []string
+	steam := steamStub{
+		friends: func(context.Context, string) ([]steamapi.Friend, error) {
+			return []steamapi.Friend{{SteamID: "friend-1"}, {SteamID: "friend-2"}}, nil
+		},
+		players: func(_ context.Context, ids []string) ([]steamapi.Player, error) {
+			if !reflect.DeepEqual(ids, []string{"friend-1", "friend-2"}) {
+				t.Errorf("hydration ids=%v", ids)
 			}
-			// The batched path fetches each roster member's owned library once to
-			// intersect. The caller's (leader's) rich library is reused for the
-			// join, so the leader is fetched exactly once — no second caller
-			// fetch. The join short-circuits only when the intersection itself
-			// errors or finds no shared library (games_error, both_errors,
-			// no_games); a players (summaries) error does not stop the
-			// shared-games intersection.
-			wantIDs := []string{"leader", "friend-2"}
-			gamesMu.Lock()
-			gotIDs := slices.Clone(gameIDs)
-			gamesMu.Unlock()
-			slices.Sort(gotIDs)
-			slices.Sort(wantIDs)
-			if !reflect.DeepEqual(gotIDs, wantIDs) {
-				t.Fatalf("game IDs=%v, want only submitted IDs plus leader: %v", gotIDs, wantIDs)
-			}
-			want := "Shared adventure"
-			switch scenario {
-			case "no games":
-				want = "no games found for user Barney. Their list may be private"
-			case "players error", "both errors":
-				want = "summaries unavailable"
-			case "games error":
-				want = "games unavailable"
-			}
-			body := w.Body.String()
-			if !strings.Contains(body, want) || (scenario != "success" && strings.Contains(body, "Shared adventure")) {
-				t.Fatalf("want %q in body=%s", want, body)
-			}
-		})
+			return []steamapi.Player{{SteamID: "friend-1", PersonaName: "Alyx"}, {SteamID: "friend-2", PersonaName: "Barney"}}, nil
+		},
+		games: func(_ context.Context, id string, _, _ bool) ([]steamapi.Game, error) {
+			mu.Lock()
+			gameIDs = append(gameIDs, id)
+			mu.Unlock()
+			return []steamapi.Game{{AppID: 10, Name: "Shared adventure"}}, nil
+		},
+		gamesDetails: allMultiplayer,
+	}
+	h := NewSharedGamesList(store, func() SteamService { return steam })
+	w := httptest.NewRecorder()
+	h.Serve(rosterContext(), w, sharedGamesRequest("friendID=friend-2&friendID=stranger"))
+	slices.Sort(gameIDs)
+	if !reflect.DeepEqual(gameIDs, []string{"friend-2", "leader"}) {
+		t.Fatalf("library fetches=%v", gameIDs)
+	}
+	if _, ok := store.users["stranger"]; ok {
+		t.Fatal("non-friend created")
+	}
+	if p := store.users["friend-2"].profile; p.PersonaName != "Barney" {
+		t.Fatalf("friend profile=%+v", p)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "Shared adventure") {
+		t.Fatalf("body=%s", body)
+	}
+}
+
+func TestSharedGamesListFriendsErrorRendered(t *testing.T) {
+	steam := steamStub{friends: func(context.Context, string) ([]steamapi.Friend, error) {
+		return nil, errors.New("friends unavailable")
+	}}
+	h := NewSharedGamesList(newMemStore(), func() SteamService { return steam })
+	w := httptest.NewRecorder()
+	h.Serve(rosterContext(), w, sharedGamesRequest(""))
+	if !strings.Contains(w.Body.String(), "friends unavailable") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+}
+
+func TestSharedGamesSyncBudgetIsAboutTwentySeconds(t *testing.T) {
+	if sharedGamesSyncBudget != 20*time.Second {
+		t.Fatalf("budget=%s", sharedGamesSyncBudget)
+	}
+	if h := NewSharedGamesList(nil, nil); h.SyncBudget != sharedGamesSyncBudget {
+		t.Fatalf("constructor budget=%s", h.SyncBudget)
 	}
 }

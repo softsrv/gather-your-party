@@ -17,6 +17,32 @@ import (
 
 func partyTestStore(t *testing.T) (*Store, *pgxpool.Pool, context.Context) {
 	t.Helper()
+	pool, ctx := scopedTestPool(t)
+	applyTestMigrations(t, ctx, pool, allTestMigrations...)
+	return New(pool), pool, ctx
+}
+
+// allTestMigrations lists every migration in the order the runner applies them.
+var allTestMigrations = []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql"}
+
+// applyTestMigrations executes the named files from migrations/ in order.
+func applyTestMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool, files ...string) {
+	t.Helper()
+	for _, file := range files {
+		migration, err := os.ReadFile("../../migrations/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+	}
+}
+
+// scopedTestPool returns a pool whose connections use a fresh, empty schema
+// that is dropped when the test ends.
+func scopedTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Fatal("TEST_DATABASE_URL must name a disposable Postgres database")
@@ -50,16 +76,7 @@ func partyTestStore(t *testing.T) (*Store, *pgxpool.Pool, context.Context) {
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"../../migrations/0001_init.sql", "../../migrations/0002_parties.sql", "../../migrations/0003_drop_rejection_tallies.sql"} {
-		migration, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, string(migration)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return New(pool), pool, ctx
+	return pool, ctx
 }
 
 func partyTestUser(t *testing.T, store *Store, ctx context.Context, steamID string) int64 {
@@ -855,5 +872,41 @@ func TestAcceptInviteRollsBackOnSecondWriteFailure(t *testing.T) {
 	var members int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id=$1 AND user_id=$2`, party, target).Scan(&members); err != nil || members != 0 {
 		t.Fatalf("partial membership=%d err=%v", members, err)
+	}
+}
+
+// Games CLM-16: a friend recorded by another user's sync who never signed in is
+// not an invite candidate, and the flag alone is what excludes them.
+func TestInviteCandidatesExcludeNeverLoggedIn(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	const leaderSteamID, loggedInSteamID, friendOnlySteamID = "76561198000017001", "76561198000017002", "76561198000017003"
+	leader := partyTestUser(t, store, ctx, leaderSteamID)
+	loggedIn := partyTestUser(t, store, ctx, loggedInSteamID)
+	friendOnly, err := store.UpsertFriend(ctx, friendOnlySteamID, steamapi.Player{PersonaName: "Friend only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	party, err := store.CreateParty(ctx, leader, "Flagged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	friends := []string{loggedInSteamID, friendOnlySteamID}
+	got, err := store.InviteCandidates(ctx, party, leader, friends)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UserID != loggedIn {
+		t.Fatalf("candidates=%+v want only %d", got, loggedIn)
+	}
+	// Ignoring the flag (here by setting it), the friend-created row matches every other condition.
+	if _, err := pool.Exec(ctx, `UPDATE users SET ever_logged_in = true WHERE id = $1`, friendOnly); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.InviteCandidates(ctx, party, leader, friends)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].UserID != loggedIn || got[1].UserID != friendOnly {
+		t.Fatalf("candidates with flag set=%+v", got)
 	}
 }
