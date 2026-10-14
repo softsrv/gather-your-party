@@ -216,3 +216,91 @@ func TestLibrarySyncDueAndRecordSyncSuccessFailure(t *testing.T) {
 		t.Fatal("just-synced user must not be due")
 	}
 }
+
+// Holding or waiting for a user sync lock never needs a second pool
+// connection: concurrent locked syncs, several of one user, all finish on a
+// 4-connection pool.
+func TestSyncLockNoPoolDeadlock(t *testing.T) {
+	_, base, ctx := partyTestStore(t)
+	pool := sameSchemaPool(t, ctx, base, 4)
+	store := New(pool)
+	shared := gameTestUser(t, store, ctx, "76561198000025000")
+	userIDs := []int64{shared, shared, shared}
+	for i := 1; i <= 4; i++ {
+		userIDs = append(userIDs, gameTestUser(t, store, ctx, fmt.Sprintf("7656119800002500%d", i)))
+	}
+	runCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var syncs sync.Map
+	errs := make([]error, len(userIDs))
+	for i, userID := range userIDs {
+		wg.Add(1)
+		go func(i int, userID int64) {
+			defer wg.Done()
+			<-start
+			errs[i] = store.WithUserSyncLock(runCtx, userID, func(ctx context.Context) error {
+				due, err := store.LibrarySyncDue(ctx, userID)
+				if err != nil || !due {
+					return err
+				}
+				n, _ := syncs.LoadOrStore(userID, new(int))
+				*n.(*int)++
+				// Hold the lock across a Steam-sized pause so waiters pile up.
+				time.Sleep(100 * time.Millisecond)
+				if err := store.StoreUserLibrary(ctx, userID, steamGames(1, 2, 3)); err != nil {
+					return err
+				}
+				if _, err := store.GamesMissingData(ctx, []int{1, 2, 3}); err != nil {
+					return err
+				}
+				return store.RecordSyncSuccess(ctx, userID)
+			})
+		}(i, userID)
+	}
+	close(start)
+	wg.Wait()
+	if err := runCtx.Err(); err != nil {
+		t.Fatalf("locked syncs did not finish within 20s: %v", err)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+	}
+	syncs.Range(func(userID, n any) bool {
+		if *n.(*int) != 1 {
+			t.Errorf("user %d synced %d times", userID, *n.(*int))
+		}
+		return true
+	})
+	if n := userGameCount(t, ctx, pool, shared); n != 3 {
+		t.Fatalf("shared user games=%d want 3", n)
+	}
+}
+
+// A panic in fn still releases the user's sync lock and propagates.
+func TestSyncLockReleasedOnPanic(t *testing.T) {
+	store, base, ctx := partyTestStore(t)
+	userID := gameTestUser(t, store, ctx, "76561198000026001")
+	func() {
+		defer func() {
+			if rec := recover(); rec != "boom" {
+				t.Fatalf("recovered %v, want the panic to propagate", rec)
+			}
+		}()
+		_ = store.WithUserSyncLock(ctx, userID, func(ctx context.Context) error {
+			if _, err := store.LibrarySyncDue(ctx, userID); err != nil {
+				return err
+			}
+			panic("boom")
+		})
+	}()
+	other := New(sameSchemaPool(t, ctx, base, 2))
+	lockCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := other.WithUserSyncLock(lockCtx, userID, func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("lock still held after a panic: %v", err)
+	}
+}

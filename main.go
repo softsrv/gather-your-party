@@ -355,6 +355,8 @@ func (app *application) handleLibrarySync(ctx *middleware.CustomContext, w http.
 	}
 	var failed bool
 	var reason string
+	// Every store call inside uses lockCtx (or a context derived from it), so it
+	// runs on the lock connection rather than taking a second one.
 	lockErr := app.store.WithUserSyncLock(syncCtx, userID, func(lockCtx context.Context) error {
 		// Another sync may have finished while this one waited on the lock.
 		due, err := app.store.LibrarySyncDue(lockCtx, userID)

@@ -317,8 +317,9 @@ func (h *SharedGamesList) syncMembers(ctx context.Context, steam SteamService, c
 }
 
 // memberSyncConcurrency caps one request's concurrent member syncs. Each holds
-// a pool connection for its sync lock and needs another for its queries, so
-// the cap keeps a connection free on the default-sized pool.
+// one pool connection for its sync lock and runs its queries on it (they use
+// the lock's context), so the cap keeps a connection free on the default-sized
+// pool.
 const memberSyncConcurrency = 3
 
 // syncRecordTimeout bounds recording a sync outcome, which runs detached from
@@ -339,6 +340,8 @@ func (h *SharedGamesList) syncMemberIfDue(ctx context.Context, steam SteamServic
 	if !due {
 		return nil
 	}
+	// Every store call below uses the lock's ctx (or one derived from it), so
+	// it runs on the lock connection rather than taking a second one.
 	return h.Store.WithUserSyncLock(ctx, userID, func(ctx context.Context) error {
 		// Another sync may have finished while this one waited on the lock.
 		due, err := h.Store.LibrarySyncDue(ctx, userID)

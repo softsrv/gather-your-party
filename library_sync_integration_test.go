@@ -281,16 +281,15 @@ func TestLibrarySyncStampOnlyOnSuccess(t *testing.T) {
 	})
 }
 
-// lsWaitAdvisoryWaiter polls until a session waits on an advisory lock.
-func lsWaitAdvisoryWaiter(t *testing.T, f *lsFixture) {
+// lsWaitLockPoller waits until a request on pool has polled the user's sync
+// lock several times after its due check: a waiter retries
+// pg_try_advisory_lock, taking a pool connection per attempt, instead of
+// blocking a session on the lock.
+func lsWaitLockPoller(t *testing.T, pool *pgxpool.Pool, baseline int64) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var waiting int
-		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`).Scan(&waiting); err != nil {
-			t.Fatal(err)
-		}
-		if waiting > 0 {
+		if pool.Stat().AcquireCount() >= baseline+6 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -302,7 +301,8 @@ func lsWaitAdvisoryWaiter(t *testing.T, f *lsFixture) {
 // run one sync; the other waits and reuses its result.
 func TestLibrarySyncTwoInstancesOneSync(t *testing.T) {
 	f := lsNewFixture(t)
-	app2 := lsApp(db.New(lsSecondPool(t, f)), f.steam)
+	pool2 := lsSecondPool(t, f)
+	app2 := lsApp(db.New(pool2), f.steam)
 	var current, maxConcurrent, total atomic.Int32
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -330,9 +330,10 @@ func TestLibrarySyncTwoInstancesOneSync(t *testing.T) {
 		wg.Add(1)
 		go run(0, f.app)
 		<-entered
+		baseline := pool2.Stat().AcquireCount()
 		wg.Add(1)
 		go run(1, app2)
-		lsWaitAdvisoryWaiter(t, f)
+		lsWaitLockPoller(t, pool2, baseline)
 		close(release)
 		wg.Wait()
 	})
