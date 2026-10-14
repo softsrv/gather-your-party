@@ -812,6 +812,76 @@ func TestSharedGamesMessagesDistinguishPrivateAndNotSynced(t *testing.T) {
 	}
 }
 
+// A synced member with a stored library takes part in the result from it, even
+// when their latest sync recorded a failure (such as a friends-refresh-only
+// failure): the failure message never replaces a usable library.
+func TestSharedGamesSyncedMemberWithLaterFailureStillCounts(t *testing.T) {
+	f := newSyncFixture(t)
+	lib := []steamapi.Game{game(1), game(2)}
+	caller, friend := f.sharedPair(lib)
+	f.storeData(db.GameData{AppID: 1, HasData: true, Multiplayer: true}, db.GameData{AppID: 2, HasData: true, Multiplayer: false})
+	f.steam.details = failDetails(t)
+	// Stamped an hour ago (not due), then a failure recorded after the success.
+	f.sgStamp(callerID, time.Hour)
+	f.sgStamp(friendA, time.Hour)
+	if err := f.store.RecordSyncFailure(f.ctx, friend, "friends refresh unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	states, err := f.store.GameSyncStates(f.ctx, []string{friendA})
+	if err != nil || states[friendA].State != db.GameSyncSynced || states[friendA].LibrarySyncError == "" {
+		t.Fatalf("friend state=%+v err=%v, want synced with a stored failure", states, err)
+	}
+
+	want := []renderedGame{{1, "Game 1", "icon1"}}
+	shared := f.sharedGames(caller, friendA)
+	party := f.partyPage(caller, friend)
+	if got := sharedRendered(t, shared); !slices.Equal(got, want) {
+		t.Errorf("shared=%+v want %+v: %s", got, want, shared)
+	}
+	if got := partyRendered(t, party); len(got) != 1 || got[0].AppID != 1 {
+		t.Errorf("party=%+v want game 1: %s", got, party)
+	}
+	for name, body := range map[string]string{"shared": shared, "party": party} {
+		for _, forbidden := range []string{"game sync failed", "friends refresh unavailable", "games not synced yet"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s: unexpected %q: %s", name, forbidden, body)
+			}
+		}
+	}
+}
+
+// A member never synced gets the sync-failed message with the stored reason
+// when a failure is recorded, and the not-synced message otherwise.
+func TestSharedGamesNeverSyncedMessageFollowsStoredFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure string
+		want    string
+		other   string
+	}{
+		{"failure recorded", "library unavailable", "Persona 503&#39;s game sync failed: library unavailable", "games not synced yet for user Persona 503"},
+		{"no failure recorded", "", "games not synced yet for user Persona 503", "game sync failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			caller := f.seed(callerID, []steamapi.Game{game(1)})
+			friend := f.user(friendB)
+			if tc.failure != "" {
+				if err := f.store.RecordSyncFailure(f.ctx, friend, tc.failure); err != nil {
+					t.Fatal(err)
+				}
+			}
+			body := f.partyPage(caller, friend)
+			if strings.Count(body, tc.want) != 1 {
+				t.Errorf("want %q once: %s", tc.want, body)
+			}
+			if strings.Contains(body, tc.other) {
+				t.Errorf("unexpected %q: %s", tc.other, body)
+			}
+		})
+	}
+}
+
 // A friend whose library fetch fails with a transport error carrying the API
 // key gets the failure message with the cause and without the key, whether the
 // reason was stored by this sync or is an old value that still holds the key.
