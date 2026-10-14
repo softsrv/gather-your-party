@@ -469,6 +469,10 @@ func TestViewsUseStoredMultiplayerData(t *testing.T) {
 	if err := f.store.StoreUserLibrary(f.ctx, friend, lib); err != nil {
 		t.Fatal(err)
 	}
+	// The caller is stored directly because a caller synced within 24h is not re-fetched.
+	if err := f.store.StoreUserLibrary(f.ctx, caller, lib); err != nil {
+		t.Fatal(err)
+	}
 	f.steam.libraries[callerID] = lib
 	f.steam.details = multiplayerDetails(3)
 	got := sharedRendered(t, f.sharedGames(caller, friendA))
