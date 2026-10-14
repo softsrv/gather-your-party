@@ -64,33 +64,6 @@ func ServeStaticFiles(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, fullPath)
 }
 
-func GamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
-	steamIDValue := ctx.Value(middleware.SteamID{})
-	if steamIDValue == nil {
-		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	playerId := steamIDValue.(string)
-	deadline := time.Now().Add(5000 * time.Millisecond)
-	newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
-	defer cancelCtx()
-	games, err := SteamService.Games(newCtx, playerId, true, true)
-	if err != nil {
-		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	// Most-played first; the library can run to hundreds of games.
-	sort.SliceStable(games, func(i, j int) bool { return games[i].PlaytimeForever > games[j].PlaytimeForever })
-	if err := template.GameList(games).Render(ctx, w); err != nil {
-		fmt.Printf("render error: %s\n", err)
-	}
-}
-
 func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
 	steamIDValue := ctx.Value(middleware.SteamID{})

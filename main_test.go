@@ -448,3 +448,42 @@ func TestSignedOutHomeOffersSteamSignIn(t *testing.T) {
 		}
 	}
 }
+
+// The signed-in home no longer lists the caller's library: the section, its
+// copy and the /frag/games fetch are all gone, and the rest of the dashboard stays.
+func TestSignedInHomeHasNoLibrarySection(t *testing.T) {
+	var html strings.Builder
+	if err := template.Home(steamapi.Player{PersonaName: "Alyx"}, "Gather Your Party", template.Main).Render(context.Background(), &html); err != nil {
+		t.Fatal(err)
+	}
+	output := html.String()
+	libraryListingPath := "/frag/" + "games"
+	for _, forbidden := range []string{
+		"Your library",
+		"Everything in your Steam account, most played first",
+		"Browse your library",
+		"library-heading",
+		`id="game-list"`,
+		libraryListingPath + `"`,
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("signed-in home must not contain %q", forbidden)
+		}
+	}
+	for _, want := range []string{"Welcome back, Alyx", "Your parties", "What can we all play?", `hx-get="/frag/friends"`} {
+		if !strings.Contains(output, want) {
+			t.Errorf("signed-in home must still contain %q", want)
+		}
+	}
+}
+
+// GET /frag/games is not registered on the app's real mux, so it is a 404.
+func TestLibraryListingRouteIsGone(t *testing.T) {
+	app := application{config: appConfig{SessionSecret: "route-test-secret"}}
+	r := httptest.NewRequest(http.MethodGet, "/frag/"+"games", nil)
+	w := httptest.NewRecorder()
+	app.routes().ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
