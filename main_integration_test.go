@@ -63,7 +63,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 		t.Fatal("cannot configure scoped test pool")
 	}
 	defer pool.Close()
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -153,7 +153,7 @@ func inviteIntegrationStore(t *testing.T) (*db.Store, *pgxpool.Pool, context.Con
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -417,6 +417,9 @@ type loginSteam struct {
 	gamesCalls []string
 	// gamesDetails overrides the default all-multiplayer GamesDetails answer.
 	gamesDetails func(ids []int) ([]steamapi.GameDetail, error)
+	// friendsErr makes Friends fail.
+	friendsErr   error
+	friendsCalls int
 }
 
 func (s *loginSteam) Games(ctx context.Context, steamID string, _, _ bool) ([]steamapi.Game, error) {
@@ -442,6 +445,12 @@ func (s *loginSteam) GamesDetails(_ context.Context, ids []int) ([]steamapi.Game
 }
 
 func (s *loginSteam) Friends(context.Context, string) ([]steamapi.Friend, error) {
+	s.mu.Lock()
+	s.friendsCalls++
+	s.mu.Unlock()
+	if s.friendsErr != nil {
+		return nil, s.friendsErr
+	}
 	friends := make([]steamapi.Friend, len(s.friends))
 	for i, id := range s.friends {
 		friends[i] = steamapi.Friend{SteamID: id, Relationship: "friend", FriendSince: 1700000000}
@@ -467,6 +476,13 @@ func (s *loginSteam) GetNumberOfCurrentPlayers(context.Context, string) (int, er
 	return 0, errors.New("unexpected GetNumberOfCurrentPlayers call")
 }
 
+// syncCalls counts the Friends and Games calls made so far.
+func (s *loginSteam) syncCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.friendsCalls + len(s.gamesCalls)
+}
+
 func (s *loginSteam) requestedGames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -479,11 +495,10 @@ type loginFixture struct {
 	ctx   context.Context
 	steam *loginSteam
 	app   *application
-	done  chan error
 }
 
-// newLoginFixture wires the real store and router with the Steam double, an
-// OpenID endpoint that answers is_valid, and a login sync completion hook.
+// newLoginFixture wires the real store and router with the Steam double and an
+// OpenID endpoint that answers is_valid.
 func newLoginFixture(t *testing.T, valid bool) *loginFixture {
 	t.Helper()
 	store, pool, ctx := inviteIntegrationStore(t)
@@ -495,12 +510,11 @@ func newLoginFixture(t *testing.T, valid bool) *loginFixture {
 	steamOpenIDEndpoint = openid.URL
 	t.Cleanup(func() { steamOpenIDEndpoint = oldEndpoint })
 	steam := &loginSteam{profiles: map[string]steamapi.Player{}}
-	f := &loginFixture{store: store, pool: pool, ctx: ctx, steam: steam, done: make(chan error, 4)}
+	f := &loginFixture{store: store, pool: pool, ctx: ctx, steam: steam}
 	f.app = &application{
-		store:         store,
-		config:        appConfig{SessionSecret: "login-sync-secret", AppBaseURL: "https://example.com"},
-		steam:         func() view.SteamService { return steam },
-		loginSyncDone: func(_ string, err error) { f.done <- err },
+		store:  store,
+		config: appConfig{SessionSecret: "login-sync-secret", AppBaseURL: "https://example.com"},
+		steam:  func() view.SteamService { return steam },
 	}
 	return f
 }
@@ -528,15 +542,27 @@ func (f *loginFixture) callback(t *testing.T) *httptest.ResponseRecorder {
 	return w
 }
 
-func (f *loginFixture) waitSync(t *testing.T) error {
+// librarySync calls the page-triggered library sync route with the cookie and
+// returns its finished response.
+func (f *loginFixture) librarySync(t *testing.T, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
-	select {
-	case err := <-f.done:
-		return err
-	case <-time.After(10 * time.Second):
-		t.Fatal("login sync did not finish")
-		return nil
+	r := httptest.NewRequest(http.MethodGet, "/library/sync", nil).WithContext(f.ctx)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	f.app.routes().ServeHTTP(w, r)
+	return w
+}
+
+// librarySyncedAt reads the login user's last-successful-sync stamp and stored
+// failure reason.
+func (f *loginFixture) librarySyncedAt(t *testing.T) (*time.Time, *string) {
+	t.Helper()
+	var at *time.Time
+	var reason *string
+	if err := f.pool.QueryRow(f.ctx, `SELECT library_synced_at, library_sync_error FROM users WHERE steam_id_64 = $1`, testSteamID).Scan(&at, &reason); err != nil {
+		t.Fatal(err)
 	}
+	return at, reason
 }
 
 // assertSignedIn checks the 303, the cookie attributes and that the cookie's
@@ -571,66 +597,37 @@ func (f *loginFixture) assertSignedIn(t *testing.T, w *httptest.ResponseRecorder
 	return c
 }
 
-// Login sync CLM-1: the callback answers while the sync is held blocked, and
-// the sync's context outlives the callback's request.
-func TestLoginSyncDoesNotBlockCallback(t *testing.T) {
+// CLM-3: the callback signs in and redirects without any Steam friends or
+// games call; nothing syncs until the sync route is requested.
+func TestLoginSyncNotStartedByCallback(t *testing.T) {
 	f := newLoginFixture(t, true)
-	f.app.loginSyncTimeout = 30 * time.Second
-	entered, release := make(chan struct{}), make(chan struct{})
-	type seen struct {
-		err       error
-		remaining time.Duration
-	}
-	atRelease := make(chan seen, 1)
-	f.steam.games = func(ctx context.Context, _ string) ([]steamapi.Game, error) {
-		close(entered)
-		<-release
-		deadline, _ := ctx.Deadline()
-		atRelease <- seen{ctx.Err(), time.Until(deadline)}
+	f.steam.games = func(context.Context, string) ([]steamapi.Game, error) {
+		t.Error("callback requested the library")
 		return nil, nil
 	}
-	w := f.callback(t)
-	f.assertSignedIn(t, w)
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("login sync never requested the library")
+	f.assertSignedIn(t, f.callback(t))
+	if n := f.steam.syncCalls(); n != 0 {
+		t.Fatalf("callback made %d sync calls", n)
 	}
-	select {
-	case err := <-f.done:
-		t.Fatalf("sync finished while blocked: %v", err)
-	default:
-	}
-	// The callback's request context is cancelled and its 5s budget would be
-	// exceeded long before the sync's own 30s deadline.
-	close(release)
-	got := <-atRelease
-	if got.err != nil {
-		t.Fatalf("sync context ended with the callback: %v", got.err)
-	}
-	if got.remaining <= 5*time.Second {
-		t.Fatalf("sync deadline %s is not its own", got.remaining)
-	}
-	if err := f.waitSync(t); err != nil {
-		t.Fatalf("sync error: %v", err)
+	if at, _ := f.librarySyncedAt(t); at != nil {
+		t.Fatalf("callback recorded a sync at %v", at)
 	}
 }
 
-// Login sync CLM-2: an erroring, panicking or never-answering Steam leaves the
-// session and redirect intact, and the server keeps serving.
+// An erroring, panicking or never-answering Steam fails the sync route's
+// response, not the session, and the server keeps serving.
 func TestLoginSyncFailuresAreContained(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		f := newLoginFixture(t, true)
 		f.steam.games = func(context.Context, string) ([]steamapi.Game, error) {
 			return nil, errors.New("steam unavailable")
 		}
-		var err error
+		var w *httptest.ResponseRecorder
 		out := captureStdout(t, func() {
-			f.assertSignedIn(t, f.callback(t))
-			err = f.waitSync(t)
+			w = f.librarySync(t, f.assertSignedIn(t, f.callback(t)))
 		})
-		if err == nil || !strings.Contains(err.Error(), "steam unavailable") || !strings.Contains(out, "login sync error") {
-			t.Fatalf("sync err=%v log=%q", err, out)
+		if !strings.Contains(w.Body.String(), "steam unavailable") || !strings.Contains(out, "steam unavailable") {
+			t.Fatalf("body=%s log=%q", w.Body.String(), out)
 		}
 	})
 	t.Run("panic", func(t *testing.T) {
@@ -639,21 +636,20 @@ func TestLoginSyncFailuresAreContained(t *testing.T) {
 			panic("steam double exploded")
 		}
 		var cookie *http.Cookie
-		var err error
-		out := captureStdout(t, func() {
+		var w *httptest.ResponseRecorder
+		captureStdout(t, func() {
 			cookie = f.assertSignedIn(t, f.callback(t))
-			err = f.waitSync(t)
+			w = f.librarySync(t, cookie)
 		})
-		if err == nil || !strings.Contains(err.Error(), "panic: steam double exploded") || !strings.Contains(out, "steam double exploded") {
-			t.Fatalf("sync err=%v log=%q", err, out)
+		if !strings.Contains(w.Body.String(), "Library sync failed") || !strings.Contains(w.Body.String(), "steam double exploded") {
+			t.Fatalf("sync body=%s", w.Body.String())
 		}
-		// The process survived; a later request is served with the session.
 		r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(f.ctx)
 		r.AddCookie(cookie)
-		w := httptest.NewRecorder()
-		f.app.routes().ServeHTTP(w, r)
-		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Login user") {
-			t.Fatalf("later request status=%d body=%s", w.Code, w.Body.String())
+		later := httptest.NewRecorder()
+		f.app.routes().ServeHTTP(later, r)
+		if later.Code != http.StatusOK || !strings.Contains(later.Body.String(), "Login user") {
+			t.Fatalf("later request status=%d body=%s", later.Code, later.Body.String())
 		}
 	})
 	t.Run("details panic", func(t *testing.T) {
@@ -664,44 +660,36 @@ func TestLoginSyncFailuresAreContained(t *testing.T) {
 		f.steam.gamesDetails = func([]int) ([]steamapi.GameDetail, error) {
 			panic("details double exploded")
 		}
-		var cookie *http.Cookie
-		var err error
+		var w *httptest.ResponseRecorder
 		out := captureStdout(t, func() {
-			cookie = f.assertSignedIn(t, f.callback(t))
-			err = f.waitSync(t)
+			w = f.librarySync(t, f.assertSignedIn(t, f.callback(t)))
 		})
-		// The panic ran in a batch goroutine, which no outer recover covers:
-		// it is that batch's error, logged, and the process survives.
-		if err == nil || !strings.Contains(err.Error(), "panic: details double exploded") || !strings.Contains(out, "details double exploded") || !strings.Contains(out, "login sync error") {
-			t.Fatalf("sync err=%v log=%q", err, out)
+		// The details panic is that batch's error; the library was stored, so
+		// the sync still succeeds.
+		if strings.Contains(w.Body.String(), "Library sync failed") || !strings.Contains(out, "details double exploded") {
+			t.Fatalf("body=%s log=%q", w.Body.String(), out)
 		}
 		var stored bool
 		if err := f.pool.QueryRow(f.ctx, `SELECT EXISTS (SELECT 1 FROM games WHERE app_id = 440 AND has_data)`).Scan(&stored); err != nil || stored {
 			t.Fatalf("data stored for panicked batch: %t err=%v", stored, err)
 		}
-		r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(f.ctx)
-		r.AddCookie(cookie)
-		w := httptest.NewRecorder()
-		f.app.routes().ServeHTTP(w, r)
-		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Login user") {
-			t.Fatalf("later request status=%d body=%s", w.Code, w.Body.String())
+		if at, _ := f.librarySyncedAt(t); at == nil {
+			t.Fatal("details failure failed the sync")
 		}
 	})
 	t.Run("deadline", func(t *testing.T) {
 		f := newLoginFixture(t, true)
-		f.app.loginSyncTimeout = 200 * time.Millisecond
+		f.app.librarySyncTimeout = 200 * time.Millisecond
 		f.steam.games = func(ctx context.Context, _ string) ([]steamapi.Game, error) {
 			<-ctx.Done() // Steam never answers; only the context ends the call.
 			return nil, ctx.Err()
 		}
+		cookie := f.assertSignedIn(t, f.callback(t))
 		start := time.Now()
-		var err error
-		captureStdout(t, func() {
-			f.assertSignedIn(t, f.callback(t))
-			err = f.waitSync(t)
-		})
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("sync err=%v, want its own deadline", err)
+		var w *httptest.ResponseRecorder
+		captureStdout(t, func() { w = f.librarySync(t, cookie) })
+		if !strings.Contains(w.Body.String(), librarySyncTimeoutReason) {
+			t.Fatalf("body=%s, want the timeout", w.Body.String())
 		}
 		if elapsed := time.Since(start); elapsed < 200*time.Millisecond || elapsed > 5*time.Second {
 			t.Fatalf("sync stopped after %s", elapsed)
@@ -709,21 +697,19 @@ func TestLoginSyncFailuresAreContained(t *testing.T) {
 	})
 }
 
-// Login sync CLM-13: a valid callback with the sync wired stores the session
-// and sets the secure cookie; an invalid assertion gets neither and no sync.
+// A valid callback stores the session and sets the secure cookie; an invalid
+// assertion gets neither, and neither makes a sync call.
 func TestLoginCallbackSessionWithSync(t *testing.T) {
 	f := newLoginFixture(t, true)
 	f.assertSignedIn(t, f.callback(t))
-	if err := f.waitSync(t); err != nil {
-		t.Fatal(err)
-	}
 
 	invalid := newLoginFixture(t, false)
-	started := 0
-	invalid.app.startLoginSync = func(int64, string) { started++ }
 	w := invalid.callback(t)
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" || len(w.Result().Cookies()) != 0 || started != 0 {
-		t.Fatalf("invalid assertion: status=%d cookies=%v syncs=%d", w.Code, w.Result().Cookies(), started)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("invalid assertion: status=%d cookies=%v", w.Code, w.Result().Cookies())
+	}
+	if f.steam.syncCalls()+invalid.steam.syncCalls() != 0 {
+		t.Fatal("callback made sync calls")
 	}
 	var sessions, users int
 	if err := invalid.pool.QueryRow(invalid.ctx, `SELECT (SELECT count(*) FROM sessions), (SELECT count(*) FROM users)`).Scan(&sessions, &users); err != nil || sessions != 0 || users != 0 {
@@ -750,9 +736,8 @@ func TestLoginSyncFriendsAndOwnLibraryOnly(t *testing.T) {
 	f.steam.games = func(context.Context, string) ([]steamapi.Game, error) {
 		return []steamapi.Game{{AppID: 440, Name: "Team Fortress 2"}}, nil
 	}
-	f.assertSignedIn(t, f.callback(t))
-	if err := f.waitSync(t); err != nil {
-		t.Fatal(err)
+	if w := f.librarySync(t, f.assertSignedIn(t, f.callback(t))); strings.Contains(w.Body.String(), "Library sync failed") {
+		t.Fatalf("sync failed: %s", w.Body.String())
 	}
 	for id, p := range want {
 		var got steamapi.Player

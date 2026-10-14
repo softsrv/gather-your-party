@@ -2,10 +2,12 @@ package view
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
+	"gather-your-party/internal/syncreason"
 	"gather-your-party/internal/template"
 	"net/http"
 	"os"
@@ -143,12 +145,23 @@ type SharedGamesListStore interface {
 	GameSyncStore
 	ResolveUserID(context.Context, string) (int64, bool, error)
 	UpsertFriend(context.Context, string, steamapi.Player) (int64, error)
+	LibrarySyncStore
+}
+
+// LibrarySyncStore is the store surface that decides whether a user's library
+// sync is due, serialises syncs of one user and records their outcome.
+type LibrarySyncStore interface {
+	LibrarySyncDue(context.Context, int64) (bool, error)
+	RecordSyncSuccess(context.Context, int64) error
+	RecordSyncFailure(context.Context, int64, string) error
+	WithUserSyncLock(context.Context, int64, func(context.Context) error) error
 }
 
 // SharedGamesList serves Get shared games from stored libraries and stored game
-// data. Each request syncs the caller's library, and syncs every selected
-// current Steam friend who has never been synced (creating their users row when
-// missing); selected ids that are not current friends are ignored.
+// data. Each request syncs the caller's library and that of every selected
+// current Steam friend when their library sync is due (creating a friend's
+// users row when missing); selected ids that are not current friends are
+// ignored.
 type SharedGamesList struct {
 	Store SharedGamesListStore
 	// Steam returns the Steam client for one request.
@@ -240,11 +253,15 @@ func (h *SharedGamesList) Serve(ctx *middleware.CustomContext, w http.ResponseWr
 	}
 }
 
-// syncMembers syncs the caller's library and every never-synced selected
-// friend concurrently under ctx. Failures are logged: the result is built from
-// whatever was stored.
+// syncMembers syncs, concurrently under ctx, the caller's library and that of
+// every selected friend whose library sync is due (never synced successfully,
+// or the last success is over 24 hours old). Each sync runs under the user's
+// sync lock and re-checks due-ness once the lock is held, so a sync already
+// running elsewhere is waited on rather than repeated. Outcomes are recorded;
+// failures are also logged: the result is built from whatever was stored.
 func (h *SharedGamesList) syncMembers(ctx context.Context, steam SteamService, caller string, friends []string, profiles map[string]steamapi.Player) {
 	var wg sync.WaitGroup
+	slots := make(chan struct{}, memberSyncConcurrency)
 	start := func(userID int64, steamID string) {
 		wg.Add(1)
 		go func() {
@@ -258,7 +275,14 @@ func (h *SharedGamesList) syncMembers(ctx context.Context, steam SteamService, c
 				}
 			}()
 			defer recoverToError(&err, fmt.Sprintf("sync games %s", steamID))
-			err = SyncUserGames(ctx, steam, h.Store, userID, steamID)
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				err = fmt.Errorf("sync games %s: %w", steamID, ctx.Err())
+				return
+			}
+			err = h.syncMemberIfDue(ctx, steam, userID, steamID)
 		}()
 	}
 
@@ -285,13 +309,56 @@ func (h *SharedGamesList) syncMembers(ctx context.Context, steam SteamService, c
 					}
 					state = db.GameSyncState{SteamID64: id, UserID: userID, State: db.GameSyncNeverSynced}
 				}
-				if state.State == db.GameSyncNeverSynced {
-					start(state.UserID, id)
-				}
+				start(state.UserID, id)
 			}
 		}
 	}
 	wg.Wait()
+}
+
+// memberSyncConcurrency caps one request's concurrent member syncs. Each holds
+// a pool connection for its sync lock and needs another for its queries, so
+// the cap keeps a connection free on the default-sized pool.
+const memberSyncConcurrency = 3
+
+// syncRecordTimeout bounds recording a sync outcome, which runs detached from
+// the request's budget so an expired budget is still recorded.
+const syncRecordTimeout = 5 * time.Second
+
+// syncMemberIfDue syncs one member's library when due, under the member's sync
+// lock. A member whose lock cannot be taken before ctx ends is left without an
+// attempt (and so without a recorded outcome).
+//
+// Assumed decision: a shared-games member sync stamps success once the library
+// is stored, without the friends refresh the page-triggered sync also runs.
+func (h *SharedGamesList) syncMemberIfDue(ctx context.Context, steam SteamService, userID int64, steamID string) error {
+	due, err := h.Store.LibrarySyncDue(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("sync games %s: %w", steamID, err)
+	}
+	if !due {
+		return nil
+	}
+	return h.Store.WithUserSyncLock(ctx, userID, func(ctx context.Context) error {
+		// Another sync may have finished while this one waited on the lock.
+		due, err := h.Store.LibrarySyncDue(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("sync games %s: %w", steamID, err)
+		}
+		if !due {
+			return nil
+		}
+		syncErr := SyncUserGames(ctx, steam, h.Store, userID, steamID)
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), syncRecordTimeout)
+		defer cancel()
+		if syncErr == nil || errors.Is(syncErr, ErrGameDetails) {
+			if err := h.Store.RecordSyncSuccess(recordCtx, userID); err != nil {
+				return errors.Join(syncErr, err)
+			}
+			return syncErr
+		}
+		return errors.Join(syncErr, h.Store.RecordSyncFailure(recordCtx, userID, syncreason.Reason(syncErr)))
+	})
 }
 
 func renderErrorMessage(ctx *middleware.CustomContext, w http.ResponseWriter, msg string) {

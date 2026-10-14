@@ -8,7 +8,11 @@ package template
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-import "gather-your-party/internal/component"
+import (
+	"context"
+
+	"gather-your-party/internal/component"
+)
 
 import "github.com/softsrv/steamapi/steamapi"
 
@@ -47,7 +51,7 @@ func Base(title string) templ.Component {
 		var templ_7745c5c3_Var2 string
 		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/template/template.templ`, Line: 27, Col: 17}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/template/template.templ`, Line: 31, Col: 17}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 		if templ_7745c5c3_Err != nil {
@@ -67,6 +71,20 @@ func Base(title string) templ.Component {
 		}
 		return nil
 	})
+}
+
+type librarySyncDueKey struct{}
+
+// WithLibrarySyncDue returns ctx carrying whether the signed-in user's library
+// sync is due; Page then renders the navbar's sync element for signed-in users.
+func WithLibrarySyncDue(ctx context.Context, due bool) context.Context {
+	return context.WithValue(ctx, librarySyncDueKey{}, due)
+}
+
+func withLibrarySyncDue(ctx context.Context, nav component.NavState) component.NavState {
+	due, _ := ctx.Value(librarySyncDueKey{}).(bool)
+	nav.LibrarySyncDue = nav.SignedIn && due
+	return nav
 }
 
 // Page is the shared chrome for full pages: navigation, content column, footer.
@@ -103,7 +121,7 @@ func Page(title string, nav component.NavState) templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = component.Navbar(nav).Render(ctx, templ_7745c5c3_Buffer)
+			templ_7745c5c3_Err = component.Navbar(withLibrarySyncDue(ctx, nav)).Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -351,7 +369,7 @@ func PartyDetail(player steamapi.Player, partyID string, partyName string, membe
 				var templ_7745c5c3_Var13 string
 				templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(partyName)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/template/template.templ`, Line: 87, Col: 17}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/template/template.templ`, Line: 105, Col: 17}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 				if templ_7745c5c3_Err != nil {

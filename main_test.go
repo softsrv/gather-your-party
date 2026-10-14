@@ -276,18 +276,6 @@ func TestCallbackPersistsVerifiedIdentityAndSignsSession(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			store := &fakeSessionStore{}
 			app := application{store: store, config: appConfig{SessionSecret: "test-secret", AppBaseURL: "https://example.com"}}
-			type syncStart struct {
-				userID  int64
-				steamID string
-			}
-			var starts []syncStart
-			app.startLoginSync = func(userID int64, steamID string) {
-				// The session must be stored before the sync starts.
-				if !reflect.DeepEqual(store.calls, []string{"upsert", "session"}) {
-					t.Errorf("login sync started before the session: %v", store.calls)
-				}
-				starts = append(starts, syncStart{userID, steamID})
-			}
 			params := callbackParams()
 			switch scenario {
 			case "upsert error":
@@ -317,6 +305,12 @@ func TestCallbackPersistsVerifiedIdentityAndSignsSession(t *testing.T) {
 					body = "ns:http://specs.openid.net/auth/2.0\nis_valid:false\n"
 				}
 				if r.URL.String() != steamOpenIDEndpoint {
+					// The callback starts no sync: no friends, games or
+					// friend-profile calls, before or after verification.
+					if p := r.URL.Path; strings.Contains(p, "GetFriendList") || strings.Contains(p, "GetOwnedGames") || strings.Contains(p, "appdetails") ||
+						(strings.Contains(p, "GetPlayerSummaries") && r.URL.Query().Get("steamids") != testSteamID) {
+						t.Errorf("callback made a sync call: %s", r.URL)
+					}
 					playerCalls++
 					if len(store.calls) != 0 || r.URL.Host != "api.steampowered.com" || r.URL.Query().Get("steamids") != testSteamID {
 						t.Error("Player must fetch the verified identity before persistence")
@@ -351,13 +345,7 @@ func TestCallbackPersistsVerifiedIdentityAndSignsSession(t *testing.T) {
 				if len(cookies) != 0 {
 					t.Fatal("failed callback set a cookie")
 				}
-				if len(starts) != 0 {
-					t.Fatalf("failed callback started a login sync: %v", starts)
-				}
 				return
-			}
-			if !reflect.DeepEqual(starts, []syncStart{{42, testSteamID}}) {
-				t.Fatalf("login sync starts = %v", starts)
 			}
 			wantPlayer := steamapi.Player{SteamID: "ignored-profile-id", PersonaName: "Alyx", AvatarSmall: "small", AvatarMedium: "medium", AvatarFull: "full"}
 			if playerCalls != 1 || store.steamID != testSteamID || store.player != wantPlayer || store.userID != 42 {

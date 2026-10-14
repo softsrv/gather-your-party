@@ -21,6 +21,7 @@ import (
 	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/middleware"
+	"gather-your-party/internal/syncreason"
 	"gather-your-party/internal/template"
 	"gather-your-party/internal/view"
 
@@ -68,19 +69,17 @@ type application struct {
 	// sharedGamesSyncBudget overrides the Get shared games sync budget when
 	// positive.
 	sharedGamesSyncBudget time.Duration
-	// startLoginSync starts the background login sync for a user who just
-	// signed in; nil uses launchLoginSync.
-	startLoginSync func(userID int64, steamID64 string)
-	// loginSyncTimeout overrides defaultLoginSyncTimeout when positive.
-	loginSyncTimeout time.Duration
-	// loginSyncDone, when set, is called with the outcome of every login sync,
-	// after any panic has been recovered.
-	loginSyncDone func(steamID64 string, err error)
+	// librarySyncTimeout overrides defaultLibrarySyncTimeout when positive.
+	librarySyncTimeout time.Duration
 }
 
-// defaultLoginSyncTimeout is the login sync's own deadline. The sync outlives
-// the callback request, so it never inherits the request's context.
-const defaultLoginSyncTimeout = 60 * time.Second
+// defaultLibrarySyncTimeout bounds the page-triggered library sync, which runs
+// inside its request and must finish under the 60-second request limit.
+const defaultLibrarySyncTimeout = 45 * time.Second
+
+// librarySyncTimeoutReason is the stored and shown reason of a sync that ran
+// out of time.
+const librarySyncTimeoutReason = syncreason.TimeoutReason
 
 // steamPlayersBatchSize is the most steam ids GetPlayerSummaries accepts per call.
 const steamPlayersBatchSize = 100
@@ -312,51 +311,152 @@ func (app *application) handleSteamCallback(w http.ResponseWriter, r *http.Reque
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
 	})
-	start := app.startLoginSync
-	if start == nil {
-		start = app.launchLoginSync
-	}
-	start(userID, verifiedSteamID64)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// launchLoginSync runs the login sync in its own goroutine and returns at once,
-// so sign-in never waits on Steam.
-func (app *application) launchLoginSync(userID int64, steamID64 string) {
-	go app.runLoginSync(userID, steamID64)
+// syncLogin creates or refreshes a users row for every Steam friend of the
+// user. Friends' libraries are never fetched here.
+func (app *application) syncLogin(ctx context.Context, steam view.SteamService, steamID64 string) error {
+	return syncLoginFriends(ctx, steam, app.store, steamID64)
 }
 
-// runLoginSync runs one login sync under its own deadline, detached from any
-// request. Errors and panics are logged; nothing here touches a response.
-func (app *application) runLoginSync(userID int64, steamID64 string) {
-	var err error
+// handleLibrarySync runs the signed-in user's page-triggered library sync
+// inside the request: the friends refresh, then the library. It returns the
+// navbar's sync status fragment. A sync that is not due makes no Steam call and
+// writes nothing. Syncs of one user are serialized by the user's sync lock; a
+// request that waited on another sync re-checks due-ness and reports that
+// sync's outcome instead of running a second one.
+func (app *application) handleLibrarySync(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	userID, ok := app.sessionUserID(ctx, w, r)
+	if !ok {
+		return
+	}
+	steamID, _ := ctx.Value(middleware.SteamID{}).(string)
+	timeout := app.librarySyncTimeout
+	if timeout <= 0 {
+		timeout = defaultLibrarySyncTimeout
+	}
+	syncCtx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	render := func(failed bool, reason string) {
+		if err := component.LibrarySyncStatus(failed, reason).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+	}
+	due, err := app.store.LibrarySyncDue(syncCtx, userID)
+	if err != nil {
+		fmt.Printf("library sync: %s\n", err)
+		render(true, "unable to check library sync")
+		return
+	}
+	if !due {
+		render(false, "")
+		return
+	}
+	var failed bool
+	var reason string
+	lockErr := app.store.WithUserSyncLock(syncCtx, userID, func(lockCtx context.Context) error {
+		// Another sync may have finished while this one waited on the lock.
+		due, err := app.store.LibrarySyncDue(lockCtx, userID)
+		if err != nil {
+			return err
+		}
+		if !due {
+			failed, reason, err = app.storedSyncOutcome(lockCtx, steamID)
+			return err
+		}
+		failed, reason = app.runLibrarySync(lockCtx, userID, steamID)
+		return nil
+	})
+	if lockErr != nil {
+		fmt.Printf("library sync %s: %s\n", steamID, lockErr)
+		failed, reason = true, syncreason.Reason(lockErr)
+	}
+	render(failed, reason)
+}
+
+// runLibrarySync runs one friends refresh and library sync and records the
+// outcome. A failure fetching game details alone does not fail the sync.
+func (app *application) runLibrarySync(ctx context.Context, userID int64, steamID string) (bool, string) {
+	syncErr := app.syncFriendsAndLibrary(ctx, userID, steamID)
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if syncErr == nil {
+		if err := app.store.RecordSyncSuccess(recordCtx, userID); err != nil {
+			fmt.Printf("library sync %s: %s\n", steamID, err)
+			return true, "unable to record library sync"
+		}
+		return false, ""
+	}
+	fmt.Printf("library sync %s: %s\n", steamID, syncErr)
+	reason := syncreason.Reason(syncErr)
+	if err := app.store.RecordSyncFailure(recordCtx, userID, reason); err != nil {
+		fmt.Printf("library sync %s: %s\n", steamID, err)
+	}
+	return true, reason
+}
+
+// syncFriendsAndLibrary refreshes the user's friends and stores their library;
+// a friends failure does not stop the library sync but still fails the result.
+// A failure fetching game details alone is logged, not returned; a panic is.
+func (app *application) syncFriendsAndLibrary(ctx context.Context, userID int64, steamID string) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			err = fmt.Errorf("login sync %s: panic: %v", steamID64, rec)
-		}
-		if err != nil {
-			fmt.Printf("login sync error: %s\n", err)
-		}
-		if app.loginSyncDone != nil {
-			app.loginSyncDone(steamID64, err)
+			err = fmt.Errorf("library sync %s: panic: %v", steamID, rec)
 		}
 	}()
-	timeout := app.loginSyncTimeout
-	if timeout <= 0 {
-		timeout = defaultLoginSyncTimeout
+	steam := app.steamService()()
+	friendsErr := app.syncLogin(ctx, steam, steamID)
+	gamesErr := view.SyncUserGames(ctx, steam, app.store, userID, steamID)
+	if errors.Is(gamesErr, view.ErrGameDetails) {
+		fmt.Printf("library sync %s: %s\n", steamID, gamesErr)
+		gamesErr = nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	err = app.syncLogin(ctx, app.steamService()(), userID, steamID64)
+	return errors.Join(friendsErr, gamesErr)
 }
 
-// syncLogin creates or refreshes a users row for every Steam friend of the
-// user, then syncs the user's own library. Friends' libraries are never
-// fetched here. A friends failure does not stop the library sync.
-func (app *application) syncLogin(ctx context.Context, steam view.SteamService, userID int64, steamID64 string) error {
-	friendsErr := syncLoginFriends(ctx, steam, app.store, steamID64)
-	gamesErr := view.SyncUserGames(ctx, steam, app.store, userID, steamID64)
-	return errors.Join(friendsErr, gamesErr)
+// storedSyncOutcome reports the stored outcome of the user's last library sync:
+// failed when a failure is stored after the last success.
+func (app *application) storedSyncOutcome(ctx context.Context, steamID string) (bool, string, error) {
+	states, err := app.store.GameSyncStates(ctx, []string{steamID})
+	if err != nil {
+		return false, "", err
+	}
+	state := states[steamID]
+	if state.LibrarySyncError == "" || state.LibrarySyncErrorAt == nil {
+		return false, "", nil
+	}
+	if state.LibrarySyncedAt != nil && !state.LibrarySyncErrorAt.After(*state.LibrarySyncedAt) {
+		return false, "", nil
+	}
+	return true, state.LibrarySyncError, nil
+}
+
+// librarySyncDue reports whether the signed-in user's navbar should carry the
+// library sync element. Lookup failures are logged and treated as not due.
+func (app *application) librarySyncDue(ctx context.Context, steamID string) bool {
+	if steamID == "" {
+		return false
+	}
+	userID, found, err := app.store.ResolveUserID(ctx, steamID)
+	if err != nil || !found {
+		if err != nil {
+			fmt.Printf("library sync due: %s\n", err)
+		}
+		return false
+	}
+	due, err := app.store.LibrarySyncDue(ctx, userID)
+	if err != nil {
+		fmt.Printf("library sync due: %s\n", err)
+		return false
+	}
+	return due
+}
+
+// pageContext carries the library-sync-due flag into a signed-in page render.
+func (app *application) pageContext(ctx *middleware.CustomContext) context.Context {
+	steamID, _ := ctx.Value(middleware.SteamID{}).(string)
+	return template.WithLibrarySyncDue(ctx, app.librarySyncDue(ctx.Context, steamID))
 }
 
 // syncLoginFriends upserts each friend's profile from Players summaries.
@@ -437,7 +537,7 @@ func (app *application) handleHome(ctx *middleware.CustomContext, w http.Respons
 		}
 		return
 	}
-	if err := template.Home(player, "Gather Your Party", template.Main).Render(ctx, w); err != nil {
+	if err := template.Home(player, "Gather Your Party", template.Main).Render(app.pageContext(ctx), w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -498,7 +598,7 @@ func (app *application) handleParties(ctx *middleware.CustomContext, w http.Resp
 	for _, invite := range invites {
 		pending = append(pending, component.UserPendingInvite{PartyID: invite.PartyID, Name: invite.Name})
 	}
-	if err := template.PartiesPage(app.currentProfile(ctx), current, pending).Render(ctx, w); err != nil {
+	if err := template.PartiesPage(app.currentProfile(ctx), current, pending).Render(app.pageContext(ctx), w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -615,7 +715,7 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 			}
 		}
 	}
-	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates, sharedGames, gamesMessages).Render(ctx, w); err != nil {
+	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates, sharedGames, gamesMessages).Render(app.pageContext(ctx), w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -625,7 +725,7 @@ func (app *application) handleLeaveConfirmation(ctx *middleware.CustomContext, w
 	if !ok {
 		return
 	}
-	if err := template.LeaveParty(app.currentProfile(ctx), partyID).Render(ctx, w); err != nil {
+	if err := template.LeaveParty(app.currentProfile(ctx), partyID).Render(app.pageContext(ctx), w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -779,6 +879,9 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("GET /auth/steam", app.handleSteamLogin)
 	mux.HandleFunc("GET /auth/steam/callback", app.handleSteamCallback)
 	mux.HandleFunc("POST /auth/steam/logout", app.handleLogout)
+	mux.HandleFunc("GET /library/sync", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleLibrarySync, auth.LoadSteamId)
+	})
 	mux.HandleFunc("GET /frag/games", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.GamesList, auth.LoadSteamId)
 	})

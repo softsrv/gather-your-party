@@ -7,6 +7,7 @@ import (
 
 	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
+	"gather-your-party/internal/syncreason"
 
 	"github.com/softsrv/steamapi/steamapi"
 	"golang.org/x/sync/errgroup"
@@ -15,6 +16,10 @@ import (
 // notSyncedMessageFormat names a member whose library has never been synced,
 // so the shared result cannot include them.
 const notSyncedMessageFormat = "games not synced yet for user %s"
+
+// syncFailedMessageFormat names a member whose last library sync failed with
+// no successful sync since, and gives the stored reason.
+const syncFailedMessageFormat = "%s's game sync failed: %s"
 
 // SharedGamesStore is the store surface the shared-games builders read.
 type SharedGamesStore interface {
@@ -32,9 +37,11 @@ type PartyGamesService interface {
 
 // storedSharedGames builds the shared multiplayer games of caller and others
 // from stored libraries and stored game data. A member in private_or_no_games
-// gets the no-games message and a member never synced (or unknown) gets the
-// not-synced message; when any member has a message the shared result cannot
-// be computed and only the messages are returned. Otherwise GamesDetails is
+// gets the no-games message, a member whose last sync failed with no success
+// since gets the sync-failed message with the stored reason, and a member never
+// attempted (or unknown) gets the not-synced message; when any member has a
+// message the shared result cannot be computed and only the messages are
+// returned. Otherwise GamesDetails is
 // requested (under fetchCtx) only for shared games with no stored data; a game
 // still without data afterwards is left out without an error. Store reads use
 // ctx. The result holds only multiplayer games, in caller library order, with
@@ -53,6 +60,8 @@ func storedSharedGames(ctx, fetchCtx context.Context, steam GameDetailsService, 
 		}
 		state, ok := states[steamID]
 		switch {
+		case ok && syncFailedSinceSuccess(state):
+			messages = append(messages, fmt.Sprintf(syncFailedMessageFormat, name, syncreason.Scrub(state.LibrarySyncError)))
 		case !ok || state.State == db.GameSyncNeverSynced:
 			messages = append(messages, fmt.Sprintf(notSyncedMessageFormat, name))
 		case state.State == db.GameSyncPrivateOrNoGames:
@@ -89,6 +98,15 @@ func storedSharedGames(ctx, fetchCtx context.Context, steam GameDetailsService, 
 		}
 	}
 	return games, nil, nil
+}
+
+// syncFailedSinceSuccess reports whether the member's last library sync
+// failed and no successful sync has been recorded since.
+func syncFailedSinceSuccess(state db.GameSyncState) bool {
+	if state.LibrarySyncError == "" {
+		return false
+	}
+	return state.LibrarySyncedAt == nil || state.LibrarySyncErrorAt == nil || state.LibrarySyncErrorAt.After(*state.LibrarySyncedAt)
 }
 
 // uniqueMembers returns caller followed by the distinct other ids.
