@@ -112,6 +112,8 @@ type fakeSessionStore struct {
 	sessionErr error
 	deleteErr  error
 	deleted    string
+	// syncedGames, when set, makes every member synced and sharing these games.
+	syncedGames []db.StoredGame
 }
 
 func (s *fakeSessionStore) UpsertUser(ctx context.Context, id string, player steamapi.Player) (int64, error) {
@@ -189,6 +191,41 @@ func (s *fakeSessionStore) InviteCandidates(context.Context, string, int64, []st
 	return nil, errors.New("unexpected InviteCandidates call")
 }
 
+// GameSyncStates reports every member never synced unless syncedGames is set.
+func (s *fakeSessionStore) GameSyncStates(_ context.Context, ids []string) (map[string]db.GameSyncState, error) {
+	states := make(map[string]db.GameSyncState)
+	if s.syncedGames != nil {
+		for i, id := range ids {
+			states[id] = db.GameSyncState{SteamID64: id, UserID: int64(i + 1), State: db.GameSyncSynced}
+		}
+	}
+	return states, nil
+}
+
+func (s *fakeSessionStore) SharedStoredGames(context.Context, string, []string) ([]db.StoredGame, error) {
+	return s.syncedGames, nil
+}
+
+func (s *fakeSessionStore) GamesMissingData(context.Context, []int) ([]int, error) {
+	return nil, nil
+}
+
+func (s *fakeSessionStore) StoreGameData(context.Context, []db.GameData) error {
+	return errors.New("unexpected StoreGameData call")
+}
+
+func (s *fakeSessionStore) StoreUserLibrary(context.Context, int64, []steamapi.Game) error {
+	return errors.New("unexpected StoreUserLibrary call")
+}
+
+func (s *fakeSessionStore) RecordEmptyLibrary(context.Context, int64) (string, error) {
+	return "", errors.New("unexpected RecordEmptyLibrary call")
+}
+
+func (s *fakeSessionStore) UpsertFriend(context.Context, string, steamapi.Player) (int64, error) {
+	return 0, errors.New("unexpected UpsertFriend call")
+}
+
 func TestCallbackRejectsInvalidAssertion(t *testing.T) {
 	received := make(chan url.Values, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +276,18 @@ func TestCallbackPersistsVerifiedIdentityAndSignsSession(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			store := &fakeSessionStore{}
 			app := application{store: store, config: appConfig{SessionSecret: "test-secret", AppBaseURL: "https://example.com"}}
+			type syncStart struct {
+				userID  int64
+				steamID string
+			}
+			var starts []syncStart
+			app.startLoginSync = func(userID int64, steamID string) {
+				// The session must be stored before the sync starts.
+				if !reflect.DeepEqual(store.calls, []string{"upsert", "session"}) {
+					t.Errorf("login sync started before the session: %v", store.calls)
+				}
+				starts = append(starts, syncStart{userID, steamID})
+			}
 			params := callbackParams()
 			switch scenario {
 			case "upsert error":
@@ -302,7 +351,13 @@ func TestCallbackPersistsVerifiedIdentityAndSignsSession(t *testing.T) {
 				if len(cookies) != 0 {
 					t.Fatal("failed callback set a cookie")
 				}
+				if len(starts) != 0 {
+					t.Fatalf("failed callback started a login sync: %v", starts)
+				}
 				return
+			}
+			if !reflect.DeepEqual(starts, []syncStart{{42, testSteamID}}) {
+				t.Fatalf("login sync starts = %v", starts)
 			}
 			wantPlayer := steamapi.Player{SteamID: "ignored-profile-id", PersonaName: "Alyx", AvatarSmall: "small", AvatarMedium: "medium", AvatarFull: "full"}
 			if playerCalls != 1 || store.steamID != testSteamID || store.player != wantPlayer || store.userID != 42 {

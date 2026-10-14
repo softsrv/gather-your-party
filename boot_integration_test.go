@@ -61,7 +61,7 @@ func bootIntegrationPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 
 func assertBootSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	for _, table := range []string{"users", "sessions", "parties", "memberships", "invites", "schema_migrations"} {
+	for _, table := range []string{"users", "sessions", "parties", "memberships", "invites", "games", "user_games", "schema_migrations"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", table).Scan(&exists); err != nil || !exists {
 			t.Fatalf("table %s exists = %v, error %v", table, exists, err)
@@ -128,13 +128,13 @@ func TestMigrateSkipsAppliedFiles(t *testing.T) {
 		return result
 	}
 	before := applied()
-	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql"} {
+	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql"} {
 		if before[filename].IsZero() {
 			t.Fatalf("missing tracking row for %s", filename)
 		}
 	}
-	if len(before) != 3 {
-		t.Fatalf("applied %d migrations, want 3", len(before))
+	if len(before) != 4 {
+		t.Fatalf("applied %d migrations, want 4", len(before))
 	}
 	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
@@ -241,5 +241,75 @@ func TestConnectRequiresWorkingDatabase(t *testing.T) {
 	}
 	if err == nil || err.Error() != "unable to connect to database" {
 		t.Fatal("expected credential-free connection failure")
+	}
+}
+
+// Games CLM-4: the embedded runner creates games unique by app id and
+// user_games unique per (user, game).
+func TestMigrateCreatesUniqueGameTables(t *testing.T) {
+	ctx, pool := bootIntegrationPool(t)
+	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+	var userID, gameID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full) VALUES ('76561198000009001', '', '', '', '') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO games (app_id, name) VALUES (440, 'Team Fortress 2') RETURNING id`).Scan(&gameID); err != nil {
+		t.Fatal(err)
+	}
+	var pgErr *pgconn.PgError
+	_, err := pool.Exec(ctx, `INSERT INTO games (app_id, name) VALUES (440, 'Duplicate')`)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" || pgErr.ConstraintName != "games_app_id_key" {
+		t.Fatalf("duplicate app id must violate games_app_id_key, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_games (user_id, game_id) VALUES ($1, $2)`, userID, gameID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO user_games (user_id, game_id, position) VALUES ($1, $2, 1)`, userID, gameID)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("duplicate (user, game) must be rejected, got %v", err)
+	}
+	var games, owned int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM games), (SELECT count(*) FROM user_games)`).Scan(&games, &owned); err != nil || games != 1 || owned != 1 {
+		t.Fatalf("games=%d user_games=%d err=%v", games, owned, err)
+	}
+}
+
+// Games CLM-15: the real runner upgrades a database whose users signed in
+// before 0004 so those rows read ever_logged_in = true; later rows default false.
+func TestMigrateMarksExistingUsersLoggedIn(t *testing.T) {
+	ctx, pool := bootIntegrationPool(t)
+	earlier := fstest.MapFS{}
+	for _, name := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql"} {
+		raw, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		earlier["migrations/"+name] = &fstest.MapFile{Data: raw}
+	}
+	if err := migrate(ctx, pool, earlier, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full) VALUES ('76561198000009101', 'Before', '', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full) VALUES ('76561198000009102', 'After', '', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+	var before, after bool
+	var state string
+	var stateAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT ever_logged_in, game_sync_state, game_sync_state_at FROM users WHERE steam_id_64 = '76561198000009101'`).Scan(&before, &state, &stateAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT ever_logged_in FROM users WHERE steam_id_64 = '76561198000009102'`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !before || after || state != "never_synced" || stateAt != nil {
+		t.Fatalf("pre-existing ever_logged_in=%v state=%q at=%v; new row ever_logged_in=%v", before, state, stateAt, after)
 	}
 }

@@ -28,17 +28,39 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) UpsertUser(ctx context.Context, verifiedSteamID64 string, player steamapi.Player) (int64, error) {
 	var id int64
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full, ever_logged_in)
+		VALUES ($1, $2, $3, $4, $5, true)
+		ON CONFLICT (steam_id_64) DO UPDATE SET
+			persona_name = EXCLUDED.persona_name,
+			avatar_small = EXCLUDED.avatar_small,
+			avatar_medium = EXCLUDED.avatar_medium,
+			avatar_full = EXCLUDED.avatar_full,
+			ever_logged_in = true,
+			updated_at = now()
+		RETURNING id`, verifiedSteamID64, player.PersonaName, player.AvatarSmall, player.AvatarMedium, player.AvatarFull).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("upsert user: %w", err)
+	}
+	return id, nil
+}
+
+// UpsertFriend records or refreshes the profile of a friend seen during another
+// user's sync. A new row is marked as never logged in; refreshing an existing
+// row never changes ever_logged_in, so a user who signed in stays eligible.
+func (s *Store) UpsertFriend(ctx context.Context, steamID64 string, player steamapi.Player) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full, ever_logged_in)
+		VALUES ($1, $2, $3, $4, $5, false)
 		ON CONFLICT (steam_id_64) DO UPDATE SET
 			persona_name = EXCLUDED.persona_name,
 			avatar_small = EXCLUDED.avatar_small,
 			avatar_medium = EXCLUDED.avatar_medium,
 			avatar_full = EXCLUDED.avatar_full,
 			updated_at = now()
-		RETURNING id`, verifiedSteamID64, player.PersonaName, player.AvatarSmall, player.AvatarMedium, player.AvatarFull).Scan(&id)
+		RETURNING id`, steamID64, player.PersonaName, player.AvatarSmall, player.AvatarMedium, player.AvatarFull).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("upsert user: %w", err)
+		return 0, fmt.Errorf("upsert friend: %w", err)
 	}
 	return id, nil
 }
@@ -449,12 +471,14 @@ func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID i
 }
 
 // InviteCandidates intersects live friend identities with registered users,
-// excluding self, current members, and pending invitees in the same SQL query.
+// excluding self, current members, pending invitees, and users who have never
+// signed in (friends recorded by another user's sync) in the same SQL query.
 func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLeaderUserID int64, friendSteamID64s []string) ([]InviteCandidate, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT u.id, u.persona_name, u.avatar_medium FROM users u
 		WHERE u.steam_id_64 = ANY($3::text[])
 			AND u.id <> $2
+			AND u.ever_logged_in
 			AND EXISTS (SELECT 1 FROM parties p WHERE p.id = $1 AND p.leader_id = $2)
 			AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.party_id = $1 AND m.user_id = u.id)
 			AND NOT EXISTS (SELECT 1 FROM invites i WHERE i.party_id = $1 AND i.user_id = u.id AND i.status = 'pending')

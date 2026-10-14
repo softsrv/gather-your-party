@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
@@ -13,10 +12,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/softsrv/steamapi/steamapi"
-	"golang.org/x/sync/errgroup"
 )
 
 type inviteFriendsService interface {
@@ -106,8 +105,40 @@ func FriendsList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.R
 	}
 }
 
-func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	SteamService := steamapi.NewClient(os.Getenv("STEAM_API_KEY"))
+// sharedGamesSyncBudget bounds the synchronous sync and game-data fetches of
+// one Get shared games request. Batches stored before it expires persist; games
+// still unresolved at expiry are left out of that result.
+const sharedGamesSyncBudget = 20 * time.Second
+
+// SharedGamesListStore is the store surface Get shared games uses.
+type SharedGamesListStore interface {
+	SharedGamesStore
+	GameSyncStore
+	ResolveUserID(context.Context, string) (int64, bool, error)
+	UpsertFriend(context.Context, string, steamapi.Player) (int64, error)
+}
+
+// SharedGamesList serves Get shared games from stored libraries and stored game
+// data. Each request syncs the caller's library, and syncs every selected
+// current Steam friend who has never been synced (creating their users row when
+// missing); selected ids that are not current friends are ignored.
+type SharedGamesList struct {
+	Store SharedGamesListStore
+	// Steam returns the Steam client for one request.
+	Steam func() SteamService
+	// SyncBudget overrides sharedGamesSyncBudget when positive.
+	SyncBudget time.Duration
+}
+
+// NewSharedGamesList returns a Get shared games handler with the production
+// sync budget.
+func NewSharedGamesList(store SharedGamesListStore, steam func() SteamService) *SharedGamesList {
+	return &SharedGamesList{Store: store, Steam: steam, SyncBudget: sharedGamesSyncBudget}
+}
+
+// Serve renders the shared multiplayer games of the caller and the selected
+// friends.
+func (h *SharedGamesList) Serve(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	steamIDValue := ctx.Value(middleware.SteamID{})
 	if steamIDValue == nil {
 		if err := template.Home(steamapi.Player{}, "Gather Your Party", template.Signin).Render(ctx, w); err != nil {
@@ -115,95 +146,131 @@ func SharedGamesList(ctx *middleware.CustomContext, w http.ResponseWriter, r *ht
 		}
 		return
 	}
-	playerId := steamIDValue.(string)
+	playerID := steamIDValue.(string)
+	steam := h.Steam()
+	budget := h.SyncBudget
+	if budget <= 0 {
+		budget = sharedGamesSyncBudget
+	}
+	syncCtx, cancelSync := context.WithTimeout(ctx.Context, budget)
+	defer cancelSync()
 
-	deadline := time.Now().Add(5000 * time.Millisecond)
-	newCtx, cancelCtx := context.WithDeadline(ctx.Context, deadline)
-	defer cancelCtx()
-
-	friends, err := SteamService.Friends(newCtx, playerId)
+	friends, err := steam.Friends(syncCtx, playerID)
 	if err != nil {
-		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
+		renderErrorMessage(ctx, w, err.Error())
 		return
 	}
-
 	if err := r.ParseForm(); err != nil {
-		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
+		renderErrorMessage(ctx, w, err.Error())
 		return
 	}
-	friendIDs := r.Form["friendID"]
 
 	rosterIDs := make([]string, 0, len(friends))
+	isFriend := make(map[string]bool, len(friends))
 	for _, friend := range friends {
 		rosterIDs = append(rosterIDs, friend.SteamID)
+		isFriend[friend.SteamID] = true
 	}
-	var roster []steamapi.Player
-	var games []steamapi.Game
-	var sharedGamesErr error
-	var fetches errgroup.Group
-	fetches.Go(func() error {
-		var err error
-		roster, err = SteamService.Players(newCtx, rosterIDs)
-		return err
-	})
-	fetches.Go(func() error {
-		// Batched intersection + bounded-concurrency classification + owned-library
-		// join replaces the retired monolithic SharedGames call.
-		games, sharedGamesErr = sharedMultiplayerGames(newCtx, SteamService, playerId, friendIDs...)
-		// Preserve NoGamesError until the roster is available for its messages.
-		return nil
-	})
-	if err := fetches.Wait(); err != nil {
-		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
+	// Only current Steam friends are synced, created or intersected.
+	selected := make([]string, 0, len(r.Form["friendID"]))
+	seen := map[string]bool{playerID: true}
+	for _, id := range r.Form["friendID"] {
+		if isFriend[id] && !seen[id] {
+			seen[id] = true
+			selected = append(selected, id)
 		}
-		return
-	}
-	if err := sharedGamesErr; err != nil {
-		if messages, ok := sharedGamesNoGamesMessages(err, roster); ok {
-			if err := template.ErrorMessages(messages).Render(ctx, w); err != nil {
-				fmt.Printf("render error: %s\n", err)
-			}
-			return
-		}
-		if err := template.ErrorMessage(err.Error()).Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
 	}
 
+	roster, err := steam.Players(syncCtx, rosterIDs)
+	if err != nil {
+		renderErrorMessage(ctx, w, err.Error())
+		return
+	}
+	profiles := make(map[string]steamapi.Player, len(roster))
+	names := make(map[string]string, len(roster))
+	for _, player := range roster {
+		profiles[player.SteamID] = player
+		names[player.SteamID] = player.PersonaName
+	}
+
+	h.syncMembers(syncCtx, steam, playerID, selected, profiles)
+
+	// Store reads use the request context so an expired budget still renders
+	// what was resolved; only Steam fetches are bounded by the budget.
+	games, messages, err := storedSharedGames(ctx.Context, syncCtx, steam, h.Store, playerID, selected, names)
+	if err != nil {
+		renderErrorMessage(ctx, w, err.Error())
+		return
+	}
+	if len(messages) > 0 {
+		if err := template.ErrorMessages(messages).Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
 	if err := template.SharedGamesList(games).Render(ctx, w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
 
-func sharedGamesNoGamesMessages(err error, roster []steamapi.Player) ([]string, bool) {
-	var nge *steamapi.NoGamesError
-	if !errors.As(err, &nge) {
-		return nil, false
+// syncMembers syncs the caller's library and every never-synced selected
+// friend concurrently under ctx. Failures are logged: the result is built from
+// whatever was stored.
+func (h *SharedGamesList) syncMembers(ctx context.Context, steam SteamService, caller string, friends []string, profiles map[string]steamapi.Player) {
+	var wg sync.WaitGroup
+	start := func(userID int64, steamID string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// A panic here would end the process (the request's recover does
+			// not cover this goroutine); log it like any other sync failure.
+			var err error
+			defer func() {
+				if err != nil {
+					fmt.Printf("shared games: %s\n", err)
+				}
+			}()
+			defer recoverToError(&err, fmt.Sprintf("sync games %s", steamID))
+			err = SyncUserGames(ctx, steam, h.Store, userID, steamID)
+		}()
 	}
-	return noGamesMessages(nge.SteamIDs, roster), true
+
+	if callerID, ok, err := h.Store.ResolveUserID(ctx, caller); err != nil {
+		fmt.Printf("shared games: resolve caller: %s\n", err)
+	} else if ok {
+		start(callerID, caller)
+	}
+
+	if len(friends) > 0 {
+		states, err := h.Store.GameSyncStates(ctx, friends)
+		if err != nil {
+			fmt.Printf("shared games: sync states: %s\n", err)
+		} else {
+			for _, id := range friends {
+				state, ok := states[id]
+				if !ok {
+					profile := profiles[id]
+					profile.SteamID = id
+					userID, err := h.Store.UpsertFriend(ctx, id, profile)
+					if err != nil {
+						fmt.Printf("shared games: create friend %s: %s\n", id, err)
+						continue
+					}
+					state = db.GameSyncState{SteamID64: id, UserID: userID, State: db.GameSyncNeverSynced}
+				}
+				if state.State == db.GameSyncNeverSynced {
+					start(state.UserID, id)
+				}
+			}
+		}
+	}
+	wg.Wait()
 }
 
-func noGamesMessages(ids []string, roster []steamapi.Player) []string {
-	personasBySteamID := make(map[string]string, len(roster))
-	for _, player := range roster {
-		personasBySteamID[player.SteamID] = player.PersonaName
+func renderErrorMessage(ctx *middleware.CustomContext, w http.ResponseWriter, msg string) {
+	if err := template.ErrorMessage(msg).Render(ctx, w); err != nil {
+		fmt.Printf("render error: %s\n", err)
 	}
-
-	messages := make([]string, 0, len(ids))
-	for _, steamID := range ids {
-		personaName := personasBySteamID[steamID]
-		if personaName == "" {
-			personaName = steamID
-		}
-		messages = append(messages, fmt.Sprintf(noGamesMessageFormat, personaName))
-	}
-	return messages
 }
 
 // sortFriends lists friends who are in a game first, then online, then offline,
