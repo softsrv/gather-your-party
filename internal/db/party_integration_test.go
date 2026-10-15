@@ -231,6 +231,13 @@ func TestCreatePartyLeaderAndSoleMember(t *testing.T) {
 	if err := uuid.Scan(id); err != nil || !uuid.Valid {
 		t.Fatalf("invalid UUID: %q", id)
 	}
+	partyMembers, err := store.PartyMembers(ctx, id)
+	if err != nil {
+		t.Fatalf("PartyMembers: %v", err)
+	}
+	if len(partyMembers) != 1 || partyMembers[0].UserID != leader || !partyMembers[0].IsLeader {
+		t.Fatalf("unexpected party members: %+v (want single leader %d)", partyMembers, leader)
+	}
 	var gotLeader, member int64
 	var name string
 	var joined time.Time
@@ -244,21 +251,14 @@ func TestCreatePartyLeaderAndSoleMember(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, id).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("members=%d, err=%v", count, err)
 	}
-	partyMembers, err := store.PartyMembers(ctx, id)
-	if err != nil {
-		t.Fatalf("PartyMembers: %v", err)
-	}
-	if len(partyMembers) != 1 || partyMembers[0].UserID != leader || !partyMembers[0].IsLeader {
-		t.Fatalf("unexpected party members: %+v (want single leader %d)", partyMembers, leader)
-	}
 	second, err := store.CreateParty(ctx, leader, "Friday games")
 	if err != nil || second == id || second == "" {
 		t.Fatalf("fresh party=%q, err=%v", second, err)
 	}
 
-	// Negative control: a party row with no memberships row returns zero
-	// members from PartyMembers. This proves PartyMembers relies on the
-	// memberships row that CreateParty atomically inserts.
+	// Negative control: a parties row with no memberships row yields zero
+	// members from PartyMembers, so the roster comes from memberships rows,
+	// not from parties.leader.
 	var partyWithoutMembers string
 	if err := pool.QueryRow(ctx, `INSERT INTO parties (leader_id, name) VALUES ($1, $2) RETURNING id`, leader, "Unjoined party").Scan(&partyWithoutMembers); err != nil {
 		t.Fatalf("insert party without members: %v", err)
