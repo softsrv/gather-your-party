@@ -429,6 +429,7 @@ func (s *Store) StepDown(ctx context.Context, partyID string, actingLeaderUserID
 // InviteCandidate is a known user eligible to appear in a party's invite picker.
 type InviteCandidate struct {
 	UserID    int64
+	SteamID   string
 	Name      string
 	AvatarURL string
 }
@@ -535,16 +536,14 @@ func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID i
 }
 
 // InviteCandidates intersects live friend identities with registered users,
-// excluding self, current members, pending invitees, and users who have never
-// signed in (friends recorded by another user's sync) in the same SQL query.
+// excluding self, current members, and pending invitees in the same SQL query.
 func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLeaderUserID int64, friendSteamID64s []string) ([]InviteCandidate, error) {
 	q, done := s.querier(ctx)
 	defer done()
 	rows, err := q.Query(ctx, `
-		SELECT u.id, u.persona_name, u.avatar_medium FROM users u
+		SELECT u.id, u.steam_id_64, u.persona_name, u.avatar_medium FROM users u
 		WHERE u.steam_id_64 = ANY($3::text[])
 			AND u.id <> $2
-			AND u.ever_logged_in
 			AND EXISTS (SELECT 1 FROM parties p WHERE p.id = $1 AND p.leader_id = $2)
 			AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.party_id = $1 AND m.user_id = u.id)
 			AND NOT EXISTS (SELECT 1 FROM invites i WHERE i.party_id = $1 AND i.user_id = u.id AND i.status = 'pending')
@@ -556,7 +555,7 @@ func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLead
 	candidates := make([]InviteCandidate, 0)
 	for rows.Next() {
 		var candidate InviteCandidate
-		if err := rows.Scan(&candidate.UserID, &candidate.Name, &candidate.AvatarURL); err != nil {
+		if err := rows.Scan(&candidate.UserID, &candidate.SteamID, &candidate.Name, &candidate.AvatarURL); err != nil {
 			return nil, fmt.Errorf("invite candidates: scan: %w", err)
 		}
 		candidates = append(candidates, candidate)

@@ -13,14 +13,25 @@ import (
 )
 
 type inviteFriendsStub struct {
-	friends []steamapi.Friend
-	err     error
-	steamID string
+	friends    []steamapi.Friend
+	players    []steamapi.Player
+	err        error
+	playersErr error
+	steamID    string
+	playerIDs  []string
 }
 
 func (s *inviteFriendsStub) Friends(_ context.Context, steamID string) ([]steamapi.Friend, error) {
 	s.steamID = steamID
 	return s.friends, s.err
+}
+
+func (s *inviteFriendsStub) Players(_ context.Context, ids []string) ([]steamapi.Player, error) {
+	s.playerIDs = append([]string(nil), ids...)
+	if s.playersErr != nil {
+		return nil, s.playersErr
+	}
+	return s.players, nil
 }
 
 type inviteCandidatesStub struct {
@@ -39,8 +50,11 @@ func (s *inviteCandidatesStub) InviteCandidates(_ context.Context, partyID strin
 }
 
 func TestBuildInviteCandidates(t *testing.T) {
-	service := &inviteFriendsStub{friends: []steamapi.Friend{{SteamID: "76561198000000002"}, {SteamID: "76561198000000003"}}}
-	store := &inviteCandidatesStub{candidates: []db.InviteCandidate{{UserID: 987, Name: "Stored name"}}}
+	service := &inviteFriendsStub{
+		friends: []steamapi.Friend{{SteamID: "76561198000000002"}, {SteamID: "76561198000000003"}},
+		players: []steamapi.Player{{SteamID: "76561198000000003", PersonaName: "Live player", AvatarMedium: "https://example.com/avatar.jpg"}},
+	}
+	store := &inviteCandidatesStub{candidates: []db.InviteCandidate{{UserID: 987, SteamID: "76561198000000002", Name: "Stored name"}}}
 	got, err := BuildInviteCandidates(context.Background(), service, store, "party", 123, "76561198000000001")
 	if err != nil {
 		t.Fatal(err)
@@ -48,8 +62,15 @@ func TestBuildInviteCandidates(t *testing.T) {
 	if service.steamID != "76561198000000001" || store.calls != 1 || store.partyID != "party" || store.actor != 123 || !reflect.DeepEqual(store.friends, []string{"76561198000000002", "76561198000000003"}) {
 		t.Fatalf("incorrect identity or lookup: service=%+v store=%+v", service, store)
 	}
-	if !reflect.DeepEqual(got, []component.InviteCandidate{{UserID: 987, Name: "Stored name"}}) {
-		t.Fatalf("picker model=%+v", got)
+	want := []component.InviteCandidate{
+		{UserID: 987, SteamID: "76561198000000002", Name: "Stored name"},
+		{UserID: 0, SteamID: "76561198000000003", Name: "Live player", AvatarURL: "https://example.com/avatar.jpg"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("picker model=%+v want=%+v", got, want)
+	}
+	if !reflect.DeepEqual(service.playerIDs, []string{"76561198000000003"}) {
+		t.Fatalf("players requested=%v want [76561198000000003]", service.playerIDs)
 	}
 }
 
@@ -69,5 +90,16 @@ func TestBuildInviteCandidatesErrors(t *testing.T) {
 		if !errors.Is(err, failure) || got != nil || store.calls != wantCalls {
 			t.Fatalf("fromFriends=%t got=%v err=%v calls=%d", fromFriends, got, err, store.calls)
 		}
+	}
+
+	// Players lookup failure test
+	service := &inviteFriendsStub{
+		friends:    []steamapi.Friend{{SteamID: "76561198000000002"}},
+		playersErr: failure,
+	}
+	store := &inviteCandidatesStub{}
+	got, err := BuildInviteCandidates(context.Background(), service, store, "party", 123, "verified")
+	if !errors.Is(err, failure) || got != nil {
+		t.Fatalf("players failure got=%v err=%v", got, err)
 	}
 }

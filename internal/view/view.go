@@ -22,6 +22,7 @@ import (
 
 type inviteFriendsService interface {
 	Friends(context.Context, string) ([]steamapi.Friend, error)
+	Players(context.Context, []string) ([]steamapi.Player, error)
 }
 
 type inviteCandidateStore interface {
@@ -29,8 +30,9 @@ type inviteCandidateStore interface {
 }
 
 // BuildInviteCandidates fetches the verified leader's live friends and builds
-// the picker model through the store's intersection and exclusions. Callers must
-// supply the SteamID and users.id resolved from the same verified session.
+// the picker model through the store's intersection and exclusions, merging live
+// friends lacking a users row (profile from Steam Players) into candidates.
+// Callers must supply the SteamID and users.id resolved from the same verified session.
 // This helper is ready for the parties view; it does not introduce a new page.
 func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, store inviteCandidateStore, partyID string, actingLeaderUserID int64, verifiedSteamID string) ([]component.InviteCandidate, error) {
 	friends, err := service.Friends(ctx, verifiedSteamID)
@@ -45,9 +47,42 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 	if err != nil {
 		return nil, fmt.Errorf("invite picker: candidates: %w", err)
 	}
+	seen := make(map[string]struct{}, len(friendIDs))
 	candidates := make([]component.InviteCandidate, 0, len(known))
 	for _, candidate := range known {
-		candidates = append(candidates, component.InviteCandidate{UserID: candidate.UserID, Name: candidate.Name, AvatarURL: candidate.AvatarURL})
+		candidates = append(candidates, component.InviteCandidate{
+			UserID:    candidate.UserID,
+			SteamID:   candidate.SteamID,
+			Name:      candidate.Name,
+			AvatarURL: candidate.AvatarURL,
+		})
+		if candidate.SteamID != "" {
+			seen[candidate.SteamID] = struct{}{}
+		}
+	}
+	var missing []string
+	for _, friendID := range friendIDs {
+		if _, ok := seen[friendID]; !ok {
+			missing = append(missing, friendID)
+		}
+	}
+	if len(missing) > 0 {
+		players, err := service.Players(ctx, missing)
+		if err != nil {
+			return nil, fmt.Errorf("invite picker: players: %w", err)
+		}
+		for _, player := range players {
+			avatar := player.AvatarMedium
+			if avatar == "" {
+				avatar = player.AvatarSmall
+			}
+			candidates = append(candidates, component.InviteCandidate{
+				UserID:    0,
+				SteamID:   player.SteamID,
+				Name:      player.PersonaName,
+				AvatarURL: avatar,
+			})
+		}
 	}
 	return candidates, nil
 }

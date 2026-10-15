@@ -875,38 +875,61 @@ func TestAcceptInviteRollsBackOnSecondWriteFailure(t *testing.T) {
 	}
 }
 
-// Games CLM-16: a friend recorded by another user's sync who never signed in is
-// not an invite candidate, and the flag alone is what excludes them.
-func TestInviteCandidatesExcludeNeverLoggedIn(t *testing.T) {
+// CLM-2: a friend recorded by another user's sync who never signed in IS
+// an invite candidate alongside signed-in friends; the ever_logged_in flag does not exclude them.
+// Friends who are members or have pending invites are excluded.
+func TestInviteCandidatesIncludeNeverSignedIn(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
-	const leaderSteamID, loggedInSteamID, friendOnlySteamID = "76561198000017001", "76561198000017002", "76561198000017003"
+	const (
+		leaderSteamID      = "76561198000017001"
+		loggedInSteamID    = "76561198000017002"
+		neverSignedInSteam = "76561198000017003"
+		memberSteamID      = "76561198000017004"
+		pendingSteamID     = "76561198000017005"
+		noRowSteamID       = "76561198000017006"
+	)
 	leader := partyTestUser(t, store, ctx, leaderSteamID)
 	loggedIn := partyTestUser(t, store, ctx, loggedInSteamID)
-	friendOnly, err := store.UpsertFriend(ctx, friendOnlySteamID, steamapi.Player{PersonaName: "Friend only"})
+	neverSignedIn, err := store.UpsertFriend(ctx, neverSignedInSteam, steamapi.Player{PersonaName: "Never signed in"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	party, err := store.CreateParty(ctx, leader, "Flagged")
+	member := partyTestUser(t, store, ctx, memberSteamID)
+	pending := partyTestUser(t, store, ctx, pendingSteamID)
+
+	party, err := store.CreateParty(ctx, leader, "Inclusion Party")
 	if err != nil {
 		t.Fatal(err)
 	}
-	friends := []string{loggedInSteamID, friendOnlySteamID}
+
+	// Add member to party memberships
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
+	// Add pending invite
+	if err := store.SendInvite(ctx, party, leader, pending); err != nil {
+		t.Fatal(err)
+	}
+
+	friends := []string{loggedInSteamID, neverSignedInSteam, memberSteamID, pendingSteamID, noRowSteamID}
 	got, err := store.InviteCandidates(ctx, party, leader, friends)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].UserID != loggedIn {
-		t.Fatalf("candidates=%+v want only %d", got, loggedIn)
+
+	// From the database query, only users with a users row who are not self, not member, and not pending are returned: loggedIn and neverSignedIn.
+	// noRowSteamID has no user row, member is excluded by memberships, pending is excluded by invites.
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2: %+v", len(got), got)
 	}
-	// Ignoring the flag (here by setting it), the friend-created row matches every other condition.
-	if _, err := pool.Exec(ctx, `UPDATE users SET ever_logged_in = true WHERE id = $1`, friendOnly); err != nil {
-		t.Fatal(err)
+	gotIDs := map[int64]string{
+		got[0].UserID: got[0].SteamID,
+		got[1].UserID: got[1].SteamID,
 	}
-	got, err = store.InviteCandidates(ctx, party, leader, friends)
-	if err != nil {
-		t.Fatal(err)
+	if gotIDs[loggedIn] != loggedInSteamID {
+		t.Errorf("expected candidate loggedIn user ID %d steamID %s, got %+v", loggedIn, loggedInSteamID, gotIDs)
 	}
-	if len(got) != 2 || got[0].UserID != loggedIn || got[1].UserID != friendOnly {
-		t.Fatalf("candidates with flag set=%+v", got)
+	if gotIDs[neverSignedIn] != neverSignedInSteam {
+		t.Errorf("expected candidate neverSignedIn user ID %d steamID %s, got %+v", neverSignedIn, neverSignedInSteam, gotIDs)
 	}
 }
