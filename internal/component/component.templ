@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 
+	"gather-your-party/internal/syncreason"
+
 	"github.com/softsrv/steamapi/steamapi"
 )
 
@@ -15,6 +17,9 @@ type NavState struct {
 	Player   steamapi.Player
 	SignedIn bool
 	Active   string
+	// LibrarySyncDue makes the navbar render the load-triggered library sync
+	// element; the zero value renders nothing.
+	LibrarySyncDue bool
 }
 
 func initial(name string) string {
@@ -22,6 +27,15 @@ func initial(name string) string {
 		return string(unicode.ToUpper(r))
 	}
 	return "?"
+}
+
+// userMenuClass pushes the menu to the right edge; when the sync element is
+// shown it already carries the auto margin.
+func userMenuClass(syncShown bool) string {
+	if syncShown {
+		return "user-menu dropdown dropdown-end"
+	}
+	return "user-menu dropdown dropdown-end ml-auto"
 }
 
 func navLinkClass(active bool) string {
@@ -128,7 +142,13 @@ templ Navbar(nav NavState) {
 					@Icon("users", "h-4 w-4")
 					Parties
 				</a>
-				<div class="user-menu dropdown dropdown-end ml-auto">
+				if nav.LibrarySyncDue {
+					<div id="library-sync" hx-get="/library/sync" hx-trigger="load" hx-swap="outerHTML" class="ml-auto flex items-center gap-2 text-xs text-base-content/60" role="status">
+						<span class="loading loading-spinner loading-sm"></span>
+						<span>Syncing your library</span>
+					</div>
+				}
+				<div class={ userMenuClass(nav.LibrarySyncDue) }>
 					<div tabindex="0" role="button" class="btn btn-ghost btn-sm h-10 gap-2 px-2" aria-label="Account menu">
 						if nav.Player.PersonaName != "" {
 							@Avatar(nav.Player.AvatarMedium, nav.Player.PersonaName, "h-7 w-7 text-xs")
@@ -149,6 +169,16 @@ templ Navbar(nav NavState) {
 			}
 		</nav>
 	</header>
+}
+
+// LibrarySyncStatus is the sync route's response, replacing the navbar's
+// #library-sync element. Success leaves an empty element; failure shows why.
+templ LibrarySyncStatus(failed bool, reason string) {
+	<div id="library-sync">
+		if failed {
+			<span class="text-xs text-error" role="alert">Library sync failed: { syncreason.Scrub(reason) }</span>
+		}
+	</div>
 }
 
 templ PageHeader(eyebrow string, title string, subtitle string) {

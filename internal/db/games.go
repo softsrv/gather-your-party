@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
+
+	"gather-your-party/internal/syncreason"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/softsrv/steamapi/steamapi"
 )
 
@@ -20,13 +24,25 @@ const (
 )
 
 // GameSyncState is a user's stored library-sync state. At is nil until the
-// first sync records a state.
+// first sync records a state. LibrarySyncedAt is the last successful page sync
+// (nil when there has been none); LibrarySyncError is the reason of the last
+// failed sync since then (empty when none) and LibrarySyncErrorAt its time.
 type GameSyncState struct {
-	SteamID64 string
-	UserID    int64
-	State     string
-	At        *time.Time
+	SteamID64          string
+	UserID             int64
+	State              string
+	At                 *time.Time
+	LibrarySyncedAt    *time.Time
+	LibrarySyncError   string
+	LibrarySyncErrorAt *time.Time
 }
+
+// librarySyncInterval is how long a successful library sync stays fresh.
+const librarySyncInterval = 24 * time.Hour
+
+// userSyncLockNamespace is the first key of the two-key advisory lock that
+// serializes library syncs of one user; the second key is the user id.
+const userSyncLockNamespace int32 = 0x4c696273 // "Libs"
 
 // GameData is the per-app detail fetched after a library sync.
 type GameData struct {
@@ -52,8 +68,11 @@ const storeLibraryAttempts = 5
 // GameSyncStates returns the stored sync state of each known user. Unknown
 // SteamID64s are absent from the map.
 func (s *Store) GameSyncStates(ctx context.Context, steamID64s []string) (map[string]GameSyncState, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT steam_id_64, id, game_sync_state, game_sync_state_at
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
+		SELECT steam_id_64, id, game_sync_state, game_sync_state_at,
+			library_synced_at, COALESCE(library_sync_error, ''), library_sync_error_at
 		FROM users WHERE steam_id_64 = ANY($1::text[])`, steamID64s)
 	if err != nil {
 		return nil, fmt.Errorf("game sync states: %w", err)
@@ -62,7 +81,8 @@ func (s *Store) GameSyncStates(ctx context.Context, steamID64s []string) (map[st
 	states := make(map[string]GameSyncState)
 	for rows.Next() {
 		var state GameSyncState
-		if err := rows.Scan(&state.SteamID64, &state.UserID, &state.State, &state.At); err != nil {
+		if err := rows.Scan(&state.SteamID64, &state.UserID, &state.State, &state.At,
+			&state.LibrarySyncedAt, &state.LibrarySyncError, &state.LibrarySyncErrorAt); err != nil {
 			return nil, fmt.Errorf("game sync states: scan: %w", err)
 		}
 		states[state.SteamID64] = state
@@ -75,10 +95,14 @@ func (s *Store) GameSyncStates(ctx context.Context, steamID64s []string) (map[st
 
 // StoreUserLibrary upserts the user's owned games and marks the user synced, in
 // one transaction. Position is the game's index in games; a repeated app id
-// keeps its first position. Rows are written in app id order so concurrent
-// syncs with overlapping libraries lock in the same order, and a transaction
-// that still loses a deadlock or serialization race is retried.
+// keeps its first position. Games are written set-based (two statements over
+// unnested arrays) in app id order so concurrent syncs with overlapping
+// libraries lock in the same order, and a transaction that still loses a
+// deadlock or serialization race is retried. Stored games missing from games
+// are kept.
 func (s *Store) StoreUserLibrary(ctx context.Context, userID int64, games []steamapi.Game) error {
+	q, done := s.querier(ctx)
+	defer done()
 	type entry struct {
 		game     steamapi.Game
 		position int
@@ -93,26 +117,39 @@ func (s *Store) StoreUserLibrary(ctx context.Context, userID int64, games []stea
 		entries = append(entries, entry{game: game, position: i})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].game.AppID < entries[j].game.AppID })
+	appIDs := make([]int32, len(entries))
+	names := make([]string, len(entries))
+	icons := make([]string, len(entries))
+	positions := make([]int32, len(entries))
+	for i, e := range entries {
+		appIDs[i] = int32(e.game.AppID)
+		names[i] = e.game.Name
+		icons[i] = e.game.ImgIconURL
+		positions[i] = int32(e.position)
+	}
 
 	var err error
 	for attempt := 0; attempt < storeLibraryAttempts; attempt++ {
-		err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-			for _, e := range entries {
-				var gameID int64
-				if err := tx.QueryRow(ctx, `
-					INSERT INTO games (app_id, name, img_icon_url) VALUES ($1, $2, $3)
-					ON CONFLICT (app_id) DO UPDATE SET
-						name = EXCLUDED.name,
-						img_icon_url = EXCLUDED.img_icon_url
-					RETURNING id`, e.game.AppID, e.game.Name, e.game.ImgIconURL).Scan(&gameID); err != nil {
-					return fmt.Errorf("upsert game %d: %w", e.game.AppID, err)
-				}
-				if _, err := tx.Exec(ctx, `
-					INSERT INTO user_games (user_id, game_id, position) VALUES ($1, $2, $3)
-					ON CONFLICT (user_id, game_id) DO UPDATE SET position = EXCLUDED.position`,
-					userID, gameID, e.position); err != nil {
-					return fmt.Errorf("upsert user game %d: %w", e.game.AppID, err)
-				}
+		err = pgx.BeginFunc(ctx, q, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO games (app_id, name, img_icon_url)
+				SELECT app_id, name, img_icon_url
+				FROM unnest($1::integer[], $2::text[], $3::text[]) AS g(app_id, name, img_icon_url)
+				ORDER BY app_id
+				ON CONFLICT (app_id) DO UPDATE SET
+					name = EXCLUDED.name,
+					img_icon_url = EXCLUDED.img_icon_url`, appIDs, names, icons); err != nil {
+				return fmt.Errorf("upsert games: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO user_games (user_id, game_id, position)
+				SELECT $1, g.id, l.position
+				FROM unnest($2::integer[], $3::integer[]) AS l(app_id, position)
+				JOIN games g ON g.app_id = l.app_id
+				ORDER BY g.id
+				ON CONFLICT (user_id, game_id) DO UPDATE SET position = EXCLUDED.position`,
+				userID, appIDs, positions); err != nil {
+				return fmt.Errorf("upsert user games: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE users SET game_sync_state = $2, game_sync_state_at = now() WHERE id = $1`,
@@ -131,12 +168,161 @@ func (s *Store) StoreUserLibrary(ctx context.Context, userID int64, games []stea
 	return nil
 }
 
+// LibrarySyncDue reports whether the user has no successful library sync or
+// the last one is older than 24 hours. An unknown user is due.
+func (s *Store) LibrarySyncDue(ctx context.Context, userID int64) (bool, error) {
+	q, done := s.querier(ctx)
+	defer done()
+	var due bool
+	err := q.QueryRow(ctx, `
+		SELECT COALESCE(
+			(SELECT library_synced_at IS NULL OR library_synced_at < now() - $2::interval FROM users WHERE id = $1),
+			true)`, userID, librarySyncInterval).Scan(&due)
+	if err != nil {
+		return false, fmt.Errorf("library sync due: %w", err)
+	}
+	return due, nil
+}
+
+// RecordSyncSuccess stamps a successful library sync and clears any stored
+// failure.
+func (s *Store) RecordSyncSuccess(ctx context.Context, userID int64) error {
+	q, done := s.querier(ctx)
+	defer done()
+	if _, err := q.Exec(ctx, `
+		UPDATE users SET library_synced_at = now(), library_sync_error = NULL, library_sync_error_at = NULL
+		WHERE id = $1`, userID); err != nil {
+		return fmt.Errorf("record sync success: %w", err)
+	}
+	return nil
+}
+
+// RecordSyncFailure stores the reason of a failed library sync. The last
+// success stamp is left unchanged. The reason is scrubbed of URL query strings
+// and key parameters before it is stored.
+func (s *Store) RecordSyncFailure(ctx context.Context, userID int64, reason string) error {
+	q, done := s.querier(ctx)
+	defer done()
+	if _, err := q.Exec(ctx, `
+		UPDATE users SET library_sync_error = $2, library_sync_error_at = now()
+		WHERE id = $1`, userID, syncreason.Scrub(reason)); err != nil {
+		return fmt.Errorf("record sync failure: %w", err)
+	}
+	return nil
+}
+
+// User sync lock polling: a waiter retries pg_try_advisory_lock with a backoff
+// from userSyncLockPollMin up to userSyncLockPollMax and holds no connection
+// between attempts.
+const (
+	userSyncLockPollMin = 20 * time.Millisecond
+	userSyncLockPollMax = 250 * time.Millisecond
+)
+
+// WithUserSyncLock runs fn while holding the user's library-sync lock: a
+// session-level advisory lock on a dedicated pool connection. While another
+// session holds the lock it polls, until ctx is done, without keeping a
+// connection between attempts. The lock lives on the connection, so a
+// connection (or instance) that dies frees it.
+//
+// Every call on s made with fn's context (or a context derived from it) runs on
+// the lock connection, one statement at a time, so holding the lock never needs
+// a second pool connection. If that connection dies, later calls fall back to
+// the pool.
+//
+// The lock is released when fn returns or panics (the panic propagates); if the
+// unlock fails the connection is closed rather than returned to the pool.
+func (s *Store) WithUserSyncLock(ctx context.Context, userID int64, fn func(ctx context.Context) error) error {
+	key := int32(userID) ^ int32(userID>>32)
+	conn, err := s.acquireUserSyncLock(ctx, key)
+	if err != nil {
+		return err
+	}
+	lock := &syncLockConn{store: s, conn: conn}
+	defer lock.release(ctx, key)
+	return fn(context.WithValue(ctx, syncLockKey{}, lock))
+}
+
+// acquireUserSyncLock returns a pool connection holding the user's advisory
+// lock. Between failed attempts the connection goes back to the pool.
+func (s *Store) acquireUserSyncLock(ctx context.Context, key int32) (*pgxpool.Conn, error) {
+	wait := userSyncLockPollMin
+	for {
+		conn, err := s.pool.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("user sync lock: acquire connection: %w", err)
+		}
+		var locked bool
+		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, $2)`, userSyncLockNamespace, key).Scan(&locked); err != nil {
+			// A cancelled attempt may leave the connection in an unknown
+			// state, possibly holding the lock.
+			closeConn(conn)
+			conn.Release()
+			return nil, fmt.Errorf("user sync lock: lock: %w", err)
+		}
+		if locked {
+			return conn, nil
+		}
+		conn.Release()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("user sync lock: lock: %w", ctx.Err())
+		case <-timer.C:
+		}
+		wait = min(2*wait, userSyncLockPollMax)
+	}
+}
+
+// syncLockKey is the context key of the held sync lock's connection.
+type syncLockKey struct{}
+
+// syncLockConn is the connection holding a user sync lock, shared by the calls
+// made under the lock. mu serializes them (a pgx connection runs one statement
+// at a time) and guards released.
+type syncLockConn struct {
+	store    *Store
+	conn     *pgxpool.Conn
+	mu       sync.Mutex
+	released bool
+}
+
+// release unlocks and returns the connection, or closes it if the unlock
+// fails. It waits for any call still using the connection, and later calls go
+// to the pool.
+func (l *syncLockConn) release(ctx context.Context, key int32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
+	l.released = true
+	defer l.conn.Release()
+	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var unlocked bool
+	if err := l.conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock($1, $2)`, userSyncLockNamespace, key).Scan(&unlocked); err != nil || !unlocked {
+		closeConn(l.conn)
+	}
+}
+
+// closeConn closes the connection so the pool discards it on Release, freeing
+// any session-level lock it held.
+func closeConn(conn *pgxpool.Conn) {
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = conn.Conn().Close(closeCtx)
+}
+
 // RecordEmptyLibrary handles a sync whose owned list came back empty. A user
 // with no stored games becomes private_or_no_games; a user with stored games
 // keeps every row and stays synced. It returns the resulting state.
 func (s *Store) RecordEmptyLibrary(ctx context.Context, userID int64) (string, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	var state string
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		UPDATE users SET
 			game_sync_state = CASE WHEN EXISTS (SELECT 1 FROM user_games WHERE user_id = $1) THEN $2 ELSE $3 END,
 			game_sync_state_at = now()
@@ -151,7 +337,9 @@ func (s *Store) RecordEmptyLibrary(ctx context.Context, userID int64) (string, e
 // GamesMissingData returns, in input order, the app ids whose games row exists
 // but whose details have not been fetched.
 func (s *Store) GamesMissingData(ctx context.Context, appIDs []int) ([]int, error) {
-	rows, err := s.pool.Query(ctx, `
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
 		SELECT app_id FROM games WHERE app_id = ANY($1::integer[]) AND details_fetched_at IS NULL`, appIDs)
 	if err != nil {
 		return nil, fmt.Errorf("games missing data: %w", err)
@@ -180,6 +368,8 @@ func (s *Store) GamesMissingData(ctx context.Context, appIDs []int) ([]int, erro
 
 // StoreGameData records fetched details for existing games.
 func (s *Store) StoreGameData(ctx context.Context, data []GameData) error {
+	q, done := s.querier(ctx)
+	defer done()
 	if len(data) == 0 {
 		return nil
 	}
@@ -189,7 +379,7 @@ func (s *Store) StoreGameData(ctx context.Context, data []GameData) error {
 			UPDATE games SET details_fetched_at = now(), has_data = $2, multiplayer = $3
 			WHERE app_id = $1`, d.AppID, d.HasData, d.Multiplayer)
 	}
-	if err := s.pool.SendBatch(ctx, batch).Close(); err != nil {
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("store game data: %w", err)
 	}
 	return nil
@@ -197,7 +387,9 @@ func (s *Store) StoreGameData(ctx context.Context, data []GameData) error {
 
 // UserGames returns the user's stored library in position order, then app id.
 func (s *Store) UserGames(ctx context.Context, steamID64 string) ([]StoredGame, error) {
-	rows, err := s.pool.Query(ctx, `
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
 		SELECT g.app_id, g.name, g.img_icon_url, g.details_fetched_at IS NOT NULL, g.has_data, g.multiplayer
 		FROM users u
 		JOIN user_games ug ON ug.user_id = u.id
@@ -214,8 +406,10 @@ func (s *Store) UserGames(ctx context.Context, steamID64 string) ([]StoredGame, 
 // also owns, in the caller's position order. With no other users it returns the
 // caller's library.
 func (s *Store) SharedStoredGames(ctx context.Context, callerSteamID64 string, otherSteamID64s []string) ([]StoredGame, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	others := uniqueStrings(otherSteamID64s)
-	rows, err := s.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT g.app_id, g.name, g.img_icon_url, g.details_fetched_at IS NOT NULL, g.has_data, g.multiplayer
 		FROM users u
 		JOIN user_games ug ON ug.user_id = u.id

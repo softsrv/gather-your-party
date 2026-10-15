@@ -1,6 +1,10 @@
 package template
 
-import "gather-your-party/internal/component"
+import (
+	"context"
+
+	"gather-your-party/internal/component"
+)
 
 import "github.com/softsrv/steamapi/steamapi"
 
@@ -32,10 +36,24 @@ templ Base(title string) {
 	</html>
 }
 
+type librarySyncDueKey struct{}
+
+// WithLibrarySyncDue returns ctx carrying whether the signed-in user's library
+// sync is due; Page then renders the navbar's sync element for signed-in users.
+func WithLibrarySyncDue(ctx context.Context, due bool) context.Context {
+	return context.WithValue(ctx, librarySyncDueKey{}, due)
+}
+
+func withLibrarySyncDue(ctx context.Context, nav component.NavState) component.NavState {
+	due, _ := ctx.Value(librarySyncDueKey{}).(bool)
+	nav.LibrarySyncDue = nav.SignedIn && due
+	return nav
+}
+
 // Page is the shared chrome for full pages: navigation, content column, footer.
 templ Page(title string, nav component.NavState) {
 	@Base(title) {
-		@component.Navbar(nav)
+		@component.Navbar(withLibrarySyncDue(ctx, nav))
 		<main class="mx-auto grid max-w-6xl gap-8 px-4 py-8 sm:px-6 sm:py-10">
 			{ children... }
 		</main>
