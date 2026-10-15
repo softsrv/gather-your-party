@@ -133,7 +133,7 @@ func uniqueMembers(caller string, others []string) []string {
 // becomes a named message; store and player-count failures are returned to the
 // caller without partial counts.
 func BuildSharedGames(ctx context.Context, steam PartyGamesService, store SharedGamesStore, members []db.PartyMember) ([]component.SharedGameCount, []string, error) {
-	if len(members) == 0 {
+	if len(members) < 2 {
 		return nil, nil, nil
 	}
 	ids := make([]string, len(members))
