@@ -244,6 +244,13 @@ func TestCreatePartyLeaderAndSoleMember(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM memberships WHERE party_id = $1`, id).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("members=%d, err=%v", count, err)
 	}
+	partyMembers, err := store.PartyMembers(ctx, id)
+	if err != nil {
+		t.Fatalf("PartyMembers: %v", err)
+	}
+	if len(partyMembers) != 1 || partyMembers[0].UserID != leader || !partyMembers[0].IsLeader {
+		t.Fatalf("unexpected party members: %+v (want single leader %d)", partyMembers, leader)
+	}
 	second, err := store.CreateParty(ctx, leader, "Friday games")
 	if err != nil || second == id || second == "" {
 		t.Fatalf("fresh party=%q, err=%v", second, err)
