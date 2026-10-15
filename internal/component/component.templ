@@ -29,12 +29,8 @@ func initial(name string) string {
 	return "?"
 }
 
-// userMenuClass pushes the menu to the right edge; when the sync element is
-// shown it already carries the auto margin.
-func userMenuClass(syncShown bool) string {
-	if syncShown {
-		return "user-menu dropdown dropdown-end"
-	}
+// userMenuClass pushes the menu to the right edge.
+func userMenuClass() string {
 	return "user-menu dropdown dropdown-end ml-auto"
 }
 
@@ -143,12 +139,12 @@ templ Navbar(nav NavState) {
 					Parties
 				</a>
 				if nav.LibrarySyncDue {
-					<div id="library-sync" hx-get="/library/sync" hx-trigger="load" hx-swap="outerHTML" class="ml-auto flex items-center gap-2 text-xs text-base-content/60" role="status">
+					<div id="library-sync" hx-get="/library/sync" hx-trigger="load" hx-swap="outerHTML" class="flex items-center gap-2 text-xs text-base-content/60" role="status">
 						<span class="loading loading-spinner loading-sm"></span>
 						<span>Syncing your library</span>
 					</div>
 				}
-				<div class={ userMenuClass(nav.LibrarySyncDue) }>
+				<div class={ userMenuClass() }>
 					<div tabindex="0" role="button" class="btn btn-ghost btn-sm h-10 gap-2 px-2" aria-label="Account menu">
 						if nav.Player.PersonaName != "" {
 							@Avatar(nav.Player.AvatarMedium, nav.Player.PersonaName, "h-7 w-7 text-xs")
