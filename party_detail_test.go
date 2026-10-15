@@ -64,7 +64,7 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &partyDetailStore{
-				leaveStore: leaveStore{found: true, candidates: []db.InviteCandidate{{UserID: 89, Name: "Eligible friend"}}},
+				leaveStore: leaveStore{found: true, candidates: []db.InviteCandidate{{UserID: 89, SteamID: friendID, Name: "Eligible friend"}}},
 				member:     true, leader: tc.leader, solo: tc.solo,
 			}
 			if tc.empty {
@@ -124,7 +124,11 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 				if friendCalls != 1 {
 					t.Fatalf("friends requests=%d", friendCalls)
 				}
-				if !tc.friendsError && (playerCalls != 0 || store.candidateCall != 1 || store.candidateParty != testPartyID || store.candidateActing != 42 || len(store.candidateFriends) != 1 || store.candidateFriends[0] != friendID) {
+				wantPlayers := 0
+				if tc.empty {
+					wantPlayers = 1
+				}
+				if !tc.friendsError && (playerCalls != wantPlayers || store.candidateCall != 1 || store.candidateParty != testPartyID || store.candidateActing != 42 || len(store.candidateFriends) != 1 || store.candidateFriends[0] != friendID) {
 					t.Fatalf("incorrect candidate lookup: players=%d store=%+v", playerCalls, store)
 				}
 			} else if friendCalls != 0 || playerCalls != 0 || store.candidateCall != 0 {
@@ -155,10 +159,14 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 				}
 				return
 			}
+			wantTarget := `name="target" value="89"`
+			if store.candidates != nil && len(store.candidates) > 0 && store.candidates[0].SteamID != "" {
+				wantTarget = `name="target" value="` + store.candidates[0].SteamID + `"`
+			}
 			for _, want := range []string{
 				`action="/parties/` + testPartyID + `/invites/send"`,
 				`action="/parties/` + testPartyID + `/step-down"`,
-				`type="submit" name="target" value="89"`,
+				wantTarget,
 				`type="submit" name="target" value="7"`,
 				"Eligible friend", "Private Gordon",
 			} {
