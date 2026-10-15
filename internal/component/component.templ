@@ -388,7 +388,7 @@ templ LeavePartyLink(partyID string) {
 	</section>
 }
 
-// Dashboard is the signed-in home: find games in common with friends, browse the library.
+// Dashboard is the signed-in home: find games in common with friends.
 templ Dashboard(player steamapi.Player) {
 	<div class="flex flex-wrap items-center gap-4 sm:gap-6">
 		@Avatar(player.AvatarFull, player.PersonaName, "h-14 w-14 text-2xl ring-2 ring-primary/40 sm:h-20 sm:w-20 sm:text-3xl")
@@ -417,23 +417,6 @@ templ Dashboard(player steamapi.Player) {
 					<div class="h-[60px] animate-pulse rounded-xl bg-base-200"></div>
 				}
 			</div>
-		</div>
-	</section>
-	<section class="panel p-5 sm:p-7" aria-labelledby="library-heading">
-		<div class="flex flex-wrap items-center gap-4">
-			<span class="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-secondary/15 text-secondary">
-				@Icon("library", "h-5 w-5")
-			</span>
-			<div class="flex-1">
-				<h2 id="library-heading" class="text-xl font-bold">Your library</h2>
-				<p class="text-sm text-base-content/60">Everything in your Steam account, most played first.</p>
-			</div>
-		</div>
-		<div id="game-list" class="mt-5">
-			<button hx-get="/frag/games" hx-target="#game-list" class="btn btn-outline gap-2">
-				Browse your library
-				<span class="htmx-indicator loading loading-spinner loading-sm"></span>
-			</button>
 		</div>
 	</section>
 }
@@ -548,20 +531,6 @@ templ GameGrid(id string, games []steamapi.Game, showPlaytime bool) {
 			</li>
 		}
 	</ul>
-}
-
-templ Library(games []steamapi.Game) {
-	if len(games) == 0 {
-		@EmptyState("library", "No games found", "Your library is empty or your Steam game details are private.")
-	} else {
-		<div class="space-y-4">
-			<div class="flex flex-wrap items-center justify-between gap-3">
-				<p class="text-sm text-base-content/60">{ strconv.Itoa(len(games)) } games</p>
-				@SearchInput("Search your library", "#library-grid li")
-			</div>
-			@GameGrid("library-grid", games, true)
-		</div>
-	}
 }
 
 // SharedGameCount pairs a shared game with its live global player count.
