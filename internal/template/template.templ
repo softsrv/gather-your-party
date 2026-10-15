@@ -156,10 +156,6 @@ templ ErrorMessages(msgs []string) {
 	@component.ErrorMessages(msgs)
 }
 
-templ GameList(games []steamapi.Game) {
-	@component.Library(games)
-}
-
 templ SharedGamesList(games []steamapi.Game) {
 	@component.SharedGames(games)
 }

@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +17,7 @@ import (
 
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/template"
+	"gather-your-party/internal/view"
 
 	"github.com/softsrv/steamapi/steamapi"
 )
@@ -113,7 +117,8 @@ type fakeSessionStore struct {
 	deleteErr  error
 	deleted    string
 	// syncedGames, when set, makes every member synced and sharing these games.
-	syncedGames []db.StoredGame
+	syncedGames     []db.StoredGame
+	resolvedSteamID string
 }
 
 func (s *fakeSessionStore) UpsertUser(ctx context.Context, id string, player steamapi.Player) (int64, error) {
@@ -130,6 +135,9 @@ func (s *fakeSessionStore) CreateSession(ctx context.Context, userID int64) (str
 
 func (s *fakeSessionStore) ResolveSession(ctx context.Context, token string) (string, bool, error) {
 	s.calls = append(s.calls, "resolve")
+	if s.resolvedSteamID != "" {
+		return s.resolvedSteamID, true, nil
+	}
 	return "", false, nil
 }
 
@@ -434,5 +442,120 @@ func TestSignedOutHomeOffersSteamSignIn(t *testing.T) {
 		if strings.Contains(output, forbidden) {
 			t.Errorf("signed-out home contains %q", forbidden)
 		}
+	}
+}
+
+// The signed-in home no longer lists the caller's library: the section, its
+// copy and the /frag/games fetch are all gone, and the rest of the dashboard stays.
+func TestSignedInHomeHasNoLibrarySection(t *testing.T) {
+	var html strings.Builder
+	if err := template.Home(steamapi.Player{PersonaName: "Alyx"}, "Gather Your Party", template.Main).Render(context.Background(), &html); err != nil {
+		t.Fatal(err)
+	}
+	output := html.String()
+	libraryListingPath := "/frag/" + "games"
+	for _, forbidden := range []string{
+		"Your library",
+		"Everything in your Steam account, most played first",
+		"Browse your library",
+		"library-heading",
+		"game-list",
+		libraryListingPath,
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("signed-in home must not contain %q", forbidden)
+		}
+	}
+	for _, want := range []string{"Welcome back, Alyx", "Your parties", "What can we all play?", "/frag/friends", `hx-get="/frag/friends"`} {
+		if !strings.Contains(output, want) {
+			t.Errorf("signed-in home must still contain %q", want)
+		}
+	}
+
+	var friendsHTML strings.Builder
+	if err := template.FriendsList([]steamapi.Player{{PersonaName: "Barney"}}).Render(context.Background(), &friendsHTML); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(friendsHTML.String(), `hx-post="/frag/shared-games"`) {
+		t.Errorf("friends picker must contain %q", `hx-post="/frag/shared-games"`)
+	}
+}
+
+type fakeSteamRouteService struct {
+	gamesCalls int
+}
+
+func (f *fakeSteamRouteService) Games(context.Context, string, bool, bool) ([]steamapi.Game, error) {
+	f.gamesCalls++
+	return nil, nil
+}
+
+func (f *fakeSteamRouteService) GamesDetails(context.Context, []int) ([]steamapi.GameDetail, error) {
+	return nil, nil
+}
+
+func (f *fakeSteamRouteService) Friends(context.Context, string) ([]steamapi.Friend, error) {
+	return nil, nil
+}
+
+func (f *fakeSteamRouteService) Players(context.Context, []string) ([]steamapi.Player, error) {
+	return nil, nil
+}
+
+func (f *fakeSteamRouteService) GetNumberOfCurrentPlayers(context.Context, string) (int, error) {
+	return 0, nil
+}
+
+func TestLibraryListingRouteIsGone(t *testing.T) {
+	secret := "test-secret"
+	store := &fakeSessionStore{resolvedSteamID: testSteamID}
+	steam := &fakeSteamRouteService{}
+	app := application{
+		store:  store,
+		config: appConfig{SessionSecret: secret},
+		steam:  func() view.SteamService { return steam },
+	}
+	handler := app.routes()
+
+	var httpGetOwnedGamesCalls int
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "GetOwnedGames") {
+			httpGetOwnedGamesCalls++
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"response":{"games":[]}}`)),
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	// 1. Signed-out GET /frag/games
+	fragGamesPath := "/frag/" + "games"
+	reqOut := httptest.NewRequest(http.MethodGet, fragGamesPath, nil)
+	wOut := httptest.NewRecorder()
+	handler.ServeHTTP(wOut, reqOut)
+	if wOut.Code != http.StatusNotFound {
+		t.Errorf("signed-out GET /frag/games status = %d, want %d", wOut.Code, http.StatusNotFound)
+	}
+	if steam.gamesCalls != 0 || httpGetOwnedGamesCalls != 0 {
+		t.Errorf("signed-out GET /frag/games invoked Steam: service calls=%d, http calls=%d", steam.gamesCalls, httpGetOwnedGamesCalls)
+	}
+
+	// 2. Signed-in GET /frag/games
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(testSessionToken))
+	cookieVal := testSessionToken + "." + hex.EncodeToString(mac.Sum(nil))
+
+	reqIn := httptest.NewRequest(http.MethodGet, fragGamesPath, nil)
+	reqIn.AddCookie(&http.Cookie{Name: "session", Value: cookieVal})
+	wIn := httptest.NewRecorder()
+	handler.ServeHTTP(wIn, reqIn)
+	if wIn.Code != http.StatusNotFound {
+		t.Errorf("signed-in GET /frag/games status = %d, want %d", wIn.Code, http.StatusNotFound)
+	}
+	if steam.gamesCalls != 0 || httpGetOwnedGamesCalls != 0 {
+		t.Errorf("signed-in GET /frag/games invoked Steam: service calls=%d, http calls=%d", steam.gamesCalls, httpGetOwnedGamesCalls)
 	}
 }
