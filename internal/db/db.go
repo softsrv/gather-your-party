@@ -19,6 +19,36 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// querier is the statement surface shared by *pgxpool.Pool and *pgxpool.Conn.
+type querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// querier returns what a call on s with ctx runs on, and a function the call
+// must defer. Under this store's user sync lock (see WithUserSyncLock) it is
+// the lock connection, held exclusively until done is called; a Store method
+// must therefore not call another Store method with the same ctx before done.
+// Otherwise, and once the lock connection is released or dead, it is the pool.
+func (s *Store) querier(ctx context.Context) (q querier, done func()) {
+	if lock, ok := ctx.Value(syncLockKey{}).(*syncLockConn); ok && lock.store == s {
+		lock.mu.Lock()
+		if !lock.released && lock.conn.Conn().IsClosed() {
+			// A dead connection has freed the lock; return it to the pool.
+			lock.released = true
+			lock.conn.Release()
+		}
+		if !lock.released {
+			return lock.conn, lock.mu.Unlock
+		}
+		lock.mu.Unlock()
+	}
+	return s.pool, func() {}
+}
+
 func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
@@ -26,8 +56,10 @@ func New(pool *pgxpool.Pool) *Store {
 // UpsertUser persists a profile for a caller-verified SteamID64. The caller must
 // verify ownership before calling; Player.SteamID is never used as identity.
 func (s *Store) UpsertUser(ctx context.Context, verifiedSteamID64 string, player steamapi.Player) (int64, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	var id int64
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full, ever_logged_in)
 		VALUES ($1, $2, $3, $4, $5, true)
 		ON CONFLICT (steam_id_64) DO UPDATE SET
@@ -48,8 +80,10 @@ func (s *Store) UpsertUser(ctx context.Context, verifiedSteamID64 string, player
 // user's sync. A new row is marked as never logged in; refreshing an existing
 // row never changes ever_logged_in, so a user who signed in stays eligible.
 func (s *Store) UpsertFriend(ctx context.Context, steamID64 string, player steamapi.Player) (int64, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	var id int64
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full, ever_logged_in)
 		VALUES ($1, $2, $3, $4, $5, false)
 		ON CONFLICT (steam_id_64) DO UPDATE SET
@@ -69,8 +103,10 @@ func (s *Store) UpsertFriend(ctx context.Context, steamID64 string, player steam
 // refreshes it from Steam at every sign-in, so pages can show the user's name and
 // avatar without calling Steam on each request.
 func (s *Store) UserProfile(ctx context.Context, steamID64 string) (steamapi.Player, bool, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	player := steamapi.Player{SteamID: steamID64}
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT persona_name, avatar_small, avatar_medium, avatar_full FROM users WHERE steam_id_64 = $1`, steamID64).
 		Scan(&player.PersonaName, &player.AvatarSmall, &player.AvatarMedium, &player.AvatarFull)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -86,8 +122,10 @@ func (s *Store) UserProfile(ctx context.Context, steamID64 string) (steamapi.Pla
 // steam_id_64 is UNIQUE, a known SteamID64 yields exactly one id; an unknown
 // one returns pgx.ErrNoRows-derived not-found (mirroring ResolveSession).
 func (s *Store) ResolveUserID(ctx context.Context, steamID64 string) (int64, bool, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	var id int64
-	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE steam_id_64 = $1`, steamID64).Scan(&id)
+	err := q.QueryRow(ctx, `SELECT id FROM users WHERE steam_id_64 = $1`, steamID64).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -100,11 +138,13 @@ func (s *Store) ResolveUserID(ctx context.Context, steamID64 string) (int64, boo
 // CreateSession creates a seven-day session with a 256-bit random opaque token.
 // A token is returned only after its database row has been stored successfully.
 func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	token, err := newSessionToken()
 	if err != nil {
 		return "", err
 	}
-	_, err = s.pool.Exec(ctx, `
+	_, err = q.Exec(ctx, `
 		INSERT INTO sessions (token, user_id, expires_at, created_at)
 		VALUES ($1, $2, now() + interval '7 days', now())`, token, userID)
 	if err != nil {
@@ -115,8 +155,10 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 
 // ResolveSession refreshes an unexpired session and returns its verified identity.
 func (s *Store) ResolveSession(ctx context.Context, token string) (string, bool, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	var steamID64 string
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		UPDATE sessions s SET expires_at = now() + interval '7 days'
 		FROM users u
 		WHERE s.token = $1 AND s.expires_at > now() AND s.user_id = u.id
@@ -132,7 +174,9 @@ func (s *Store) ResolveSession(ctx context.Context, token string) (string, bool,
 
 // DeleteSession invalidates a session; an unknown token is already invalidated.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token); err != nil {
+	q, done := s.querier(ctx)
+	defer done()
+	if _, err := q.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token); err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}
 	return nil
@@ -140,7 +184,9 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 
 // CreateParty atomically makes the creator the leader and sole member of a new party.
 func (s *Store) CreateParty(ctx context.Context, leaderUserID int64, name string) (string, error) {
-	tx, err := s.pool.Begin(ctx)
+	q, done := s.querier(ctx)
+	defer done()
+	tx, err := q.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("begin create party: %w", err)
 	}
@@ -167,7 +213,9 @@ type UserParty struct {
 
 // UserParties lists the user's memberships in stable party creation order.
 func (s *Store) UserParties(ctx context.Context, userID int64) ([]UserParty, error) {
-	rows, err := s.pool.Query(ctx, `
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
 		SELECT parties.id, parties.name
 		FROM memberships JOIN parties ON memberships.party_id = parties.id
 		WHERE memberships.user_id = $1
@@ -198,7 +246,9 @@ type UserPendingInvite struct {
 
 // UserPendingInvites lists only invitations still awaiting this user's reply.
 func (s *Store) UserPendingInvites(ctx context.Context, userID int64) ([]UserPendingInvite, error) {
-	rows, err := s.pool.Query(ctx, `
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
 		SELECT parties.id, parties.name
 		FROM invites JOIN parties ON invites.party_id = parties.id
 		WHERE invites.user_id = $1 AND invites.status = 'pending'
@@ -232,7 +282,9 @@ type PartyMember struct {
 
 // PartyMembers lists members in seniority order, with user ID breaking ties.
 func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember, error) {
-	rows, err := s.pool.Query(ctx, `
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
 		SELECT users.id, users.steam_id_64, users.persona_name, users.avatar_medium, users.id = parties.leader_id
 		FROM memberships JOIN users ON memberships.user_id = users.id
 		JOIN parties ON memberships.party_id = parties.id
@@ -258,8 +310,10 @@ func (s *Store) PartyMembers(ctx context.Context, partyID string) ([]PartyMember
 
 // IsMember reports whether the user belongs to the specified party.
 func (s *Store) IsMember(ctx context.Context, partyID string, userID int64) (bool, error) {
+	q, done := s.querier(ctx)
+	defer done()
 	var member bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, partyID, userID).Scan(&member); err != nil {
+	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, partyID, userID).Scan(&member); err != nil {
 		return false, fmt.Errorf("check membership: %w", err)
 	}
 	return member, nil
@@ -271,7 +325,9 @@ func (s *Store) IsMember(ctx context.Context, partyID string, userID int64) (boo
 // tiebreaker). If the leave empties the party of all members, the party row
 // itself is deleted, cascading to its memberships and invites.
 func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int64) error {
-	tx, err := s.pool.Begin(ctx)
+	q, done := s.querier(ctx)
+	defer done()
+	tx, err := q.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin leave party: %w", err)
 	}
@@ -329,7 +385,9 @@ func (s *Store) LeaveParty(ctx context.Context, partyID string, actingUserID int
 // have at least one other member, and the target must already be a member.
 // The former leader remains an ordinary member; no membership rows change.
 func (s *Store) StepDown(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error {
-	tx, err := s.pool.Begin(ctx)
+	q, done := s.querier(ctx)
+	defer done()
+	tx, err := q.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin step down: %w", err)
 	}
@@ -379,7 +437,9 @@ type InviteCandidate struct {
 // invited again after rejecting. Locking the party serializes this with replies
 // and leadership changes.
 func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error {
-	tx, err := s.pool.Begin(ctx)
+	q, done := s.querier(ctx)
+	defer done()
+	tx, err := q.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin send invite: %w", err)
 	}
@@ -410,7 +470,9 @@ func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUser
 
 // AcceptInvite atomically joins the acting user and consumes their pending invite.
 func (s *Store) AcceptInvite(ctx context.Context, partyID string, actingUserID int64) error {
-	tx, err := s.pool.Begin(ctx)
+	q, done := s.querier(ctx)
+	defer done()
+	tx, err := q.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin accept invite: %w", err)
 	}
@@ -443,7 +505,9 @@ func (s *Store) AcceptInvite(ctx context.Context, partyID string, actingUserID i
 // RejectInvite consumes only the acting user's pending invite without creating
 // a membership.
 func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID int64) error {
-	tx, err := s.pool.Begin(ctx)
+	q, done := s.querier(ctx)
+	defer done()
+	tx, err := q.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin reject invite: %w", err)
 	}
@@ -474,7 +538,9 @@ func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID i
 // excluding self, current members, pending invitees, and users who have never
 // signed in (friends recorded by another user's sync) in the same SQL query.
 func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLeaderUserID int64, friendSteamID64s []string) ([]InviteCandidate, error) {
-	rows, err := s.pool.Query(ctx, `
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
 		SELECT u.id, u.persona_name, u.avatar_medium FROM users u
 		WHERE u.steam_id_64 = ANY($3::text[])
 			AND u.id <> $2

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -468,6 +469,10 @@ func TestViewsUseStoredMultiplayerData(t *testing.T) {
 	if err := f.store.StoreUserLibrary(f.ctx, friend, lib); err != nil {
 		t.Fatal(err)
 	}
+	// The caller is stored directly because a caller synced within 24h is not re-fetched.
+	if err := f.store.StoreUserLibrary(f.ctx, caller, lib); err != nil {
+		t.Fatal(err)
+	}
 	f.steam.libraries[callerID] = lib
 	f.steam.details = multiplayerDetails(3)
 	got := sharedRendered(t, f.sharedGames(caller, friendA))
@@ -649,8 +654,49 @@ func TestSharedGamesBudgetStoresReturnedBatch(t *testing.T) {
 	}
 }
 
-// CLM-21: each request re-fetches the caller's library, stores new games with
-// data, then builds the result.
+// sgFriendC is a third current friend for the library-sync tests.
+const sgFriendC = "76561198000000504"
+
+// sgStamp records the user's last successful library sync as age ago.
+func (f *syncFixture) sgStamp(steamID string, age time.Duration) {
+	f.t.Helper()
+	if _, err := f.pool.Exec(f.ctx, `UPDATE users SET library_synced_at = now() - $2::interval WHERE steam_id_64 = $1`, steamID, age); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// sgSecondStore opens a Store on its own pool against the fixture database,
+// standing for another app instance.
+func (f *syncFixture) sgSecondStore() *db.Store {
+	f.t.Helper()
+	pool, err := pgxpool.NewWithConfig(f.ctx, f.pool.Config())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(pool.Close)
+	return db.New(pool)
+}
+
+// sgSharedGames POSTs Get shared games through app as the caller.
+func (f *syncFixture) sgSharedGames(app *application, userID int64, friendIDs ...string) (string, error) {
+	form := make([]string, len(friendIDs))
+	for i, id := range friendIDs {
+		form[i] = "friendID=" + id
+	}
+	r := httptest.NewRequest(http.MethodPost, "/frag/shared-games", strings.NewReader(strings.Join(form, "&"))).WithContext(f.ctx)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.AddCookie(f.cookie(userID))
+	w := httptest.NewRecorder()
+	app.routes().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		return "", fmt.Errorf("shared games status=%d body=%s", w.Code, w.Body.String())
+	}
+	return w.Body.String(), nil
+}
+
+// CLM-9: the caller and each selected friend are synced only when due: a
+// caller synced within 24 hours is not resynced, one synced over 24 hours ago
+// is, and a never-synced friend is.
 func TestSharedGamesResyncsCallerLibrary(t *testing.T) {
 	f := newSyncFixture(t)
 	caller, _ := f.sharedPair([]steamapi.Game{game(1)})
@@ -658,54 +704,365 @@ func TestSharedGamesResyncsCallerLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.storeData(db.GameData{AppID: 1, HasData: true, Multiplayer: true})
-	if _, ok := f.userGames(callerID)[77]; ok {
-		t.Fatal("precondition: caller already stores game 77")
-	}
 	f.steam.libraries[callerID] = []steamapi.Game{game(1), game(77)}
 	f.steam.details = multiplayerDetails(77)
+
+	// Synced 1h ago: not due, not refetched.
+	f.sgStamp(callerID, time.Hour)
+	f.sgStamp(friendA, time.Hour)
 	got := sharedRendered(t, f.sharedGames(caller, friendA))
+	if f.steam.gamesCalled(callerID) || f.steam.gamesCalled(friendA) {
+		t.Fatalf("fresh library refetched: calls=%v", f.steam.gamesCalls)
+	}
+	if want := []renderedGame{{1, "Game 1", "icon1"}}; !slices.Equal(got, want) {
+		t.Fatalf("fresh shared=%+v", got)
+	}
+
+	// Synced 25h ago: due, refetched and stored with data.
+	f.sgStamp(callerID, 25*time.Hour)
+	got = sharedRendered(t, f.sharedGames(caller, friendA))
 	if !f.steam.gamesCalled(callerID) {
-		t.Fatal("caller library not fetched")
+		t.Fatal("stale caller library not fetched")
+	}
+	if f.steam.gamesCalled(friendA) {
+		t.Fatal("fresh friend library refetched")
 	}
 	if x := f.userGames(callerID)[77]; !x.DataFetched || !x.Multiplayer {
 		t.Fatalf("game 77 stored as %+v", x)
 	}
 	if want := []renderedGame{{1, "Game 1", "icon1"}, {77, "Game 77", "icon77"}}; !slices.Equal(got, want) {
-		t.Fatalf("shared=%+v", got)
+		t.Fatalf("stale shared=%+v", got)
+	}
+	if due, err := f.store.LibrarySyncDue(f.ctx, caller); err != nil || due {
+		t.Fatalf("caller still due after sync: due=%v err=%v", due, err)
+	}
+
+	// A never-synced friend is synced.
+	f.steam.friends = []string{friendA, friendB}
+	f.steam.libraries[friendB] = []steamapi.Game{game(77)}
+	f.steam.mu.Lock()
+	f.steam.gamesCalls = nil
+	f.steam.mu.Unlock()
+	got = sharedRendered(t, f.sharedGames(caller, friendB))
+	if !f.steam.gamesCalled(friendB) || f.steam.gamesCalled(callerID) {
+		t.Fatalf("calls=%v want friend only", f.steam.gamesCalls)
+	}
+	if want := []renderedGame{{77, "Game 77", "icon77"}}; !slices.Equal(got, want) {
+		t.Fatalf("new friend shared=%+v", got)
 	}
 }
 
-// CLM-24: private_or_no_games and never_synced members get distinct messages.
+// CLM-24/CLM-13: private_or_no_games, failed-sync and never-attempted members
+// get distinct messages.
 func TestSharedGamesMessagesDistinguishPrivateAndNotSynced(t *testing.T) {
 	f := newSyncFixture(t)
+	f.app.sharedGamesSyncBudget = 500 * time.Millisecond
 	caller := f.seed(callerID, []steamapi.Game{game(1)})
 	private := f.user(friendA)
 	if _, err := f.store.RecordEmptyLibrary(f.ctx, private); err != nil {
 		t.Fatal(err)
 	}
-	notSynced := f.user(friendB)
+	failed := f.user(friendB)
+	neverAttempted := f.user(sgFriendC)
 	f.steam.libraries[callerID] = []steamapi.Game{game(1)}
 	f.steam.gamesErr[friendB] = errors.New("library unavailable") // sync fails
-	f.steam.friends = []string{friendA, friendB}
+	f.steam.friends = []string{friendA, friendB, sgFriendC}
 	f.steam.details = multiplayerDetails(1)
+
+	// friendC's lock is held by another instance past the budget, so no sync
+	// of theirs is attempted by the request.
+	elsewhere := f.sgSecondStore()
+	locked, release, held := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		held <- elsewhere.WithUserSyncLock(f.ctx, neverAttempted, func(context.Context) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	shared := f.sharedGames(caller, friendA, friendB, sgFriendC)
+	close(release)
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+
 	privateMsg := "no games found for user Persona 502. Their list may be private"
-	notSyncedMsg := "games not synced yet for user Persona 503"
+	failedMsg := "Persona 503&#39;s game sync failed: "
+	notSyncedMsg := "games not synced yet for user Persona 504"
 	for name, body := range map[string]string{
-		"shared": f.sharedGames(caller, friendA, friendB),
-		"party":  f.partyPage(caller, private, notSynced),
+		"shared": shared,
+		"party":  f.partyPage(caller, private, failed, neverAttempted),
 	} {
-		for _, want := range []string{privateMsg, notSyncedMsg} {
+		for _, want := range []string{privateMsg, failedMsg, notSyncedMsg} {
 			if strings.Count(body, want) != 1 {
 				t.Errorf("%s: want %q once: %s", name, want, body)
 			}
 		}
-		for _, forbidden := range []string{"no games found for user Persona 503", "games not synced yet for user Persona 502", "games not synced yet for user Persona 501", "no games found for user Persona 501"} {
+		if !regexp.MustCompile(`Persona 503&#39;s game sync failed: [^<]*library unavailable`).MatchString(body) {
+			t.Errorf("%s: failure reason missing: %s", name, body)
+		}
+		for _, forbidden := range []string{"games not synced yet for user Persona 503", "no games found for user Persona 503", "games not synced yet for user Persona 502", "games not synced yet for user Persona 501", "no games found for user Persona 501", "Persona 504&#39;s game sync failed"} {
 			if strings.Contains(body, forbidden) {
 				t.Errorf("%s: unexpected %q", name, forbidden)
 			}
 		}
 	}
 	if !f.steam.gamesCalled(friendB) {
-		t.Fatal("never-synced friend sync not attempted")
+		t.Fatal("failing friend sync not attempted")
+	}
+	if f.steam.gamesCalled(sgFriendC) {
+		t.Fatal("locked friend synced")
+	}
+}
+
+// A synced member with a stored library takes part in the result from it, even
+// when their latest sync recorded a failure (such as a friends-refresh-only
+// failure): the failure message never replaces a usable library.
+func TestSharedGamesSyncedMemberWithLaterFailureStillCounts(t *testing.T) {
+	f := newSyncFixture(t)
+	lib := []steamapi.Game{game(1), game(2)}
+	caller, friend := f.sharedPair(lib)
+	f.storeData(db.GameData{AppID: 1, HasData: true, Multiplayer: true}, db.GameData{AppID: 2, HasData: true, Multiplayer: false})
+	f.steam.details = failDetails(t)
+	// Stamped an hour ago (not due), then a failure recorded after the success.
+	f.sgStamp(callerID, time.Hour)
+	f.sgStamp(friendA, time.Hour)
+	if err := f.store.RecordSyncFailure(f.ctx, friend, "friends refresh unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	states, err := f.store.GameSyncStates(f.ctx, []string{friendA})
+	if err != nil || states[friendA].State != db.GameSyncSynced || states[friendA].LibrarySyncError == "" {
+		t.Fatalf("friend state=%+v err=%v, want synced with a stored failure", states, err)
+	}
+
+	want := []renderedGame{{1, "Game 1", "icon1"}}
+	shared := f.sharedGames(caller, friendA)
+	party := f.partyPage(caller, friend)
+	if got := sharedRendered(t, shared); !slices.Equal(got, want) {
+		t.Errorf("shared=%+v want %+v: %s", got, want, shared)
+	}
+	if got := partyRendered(t, party); len(got) != 1 || got[0].AppID != 1 {
+		t.Errorf("party=%+v want game 1: %s", got, party)
+	}
+	for name, body := range map[string]string{"shared": shared, "party": party} {
+		for _, forbidden := range []string{"game sync failed", "friends refresh unavailable", "games not synced yet"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s: unexpected %q: %s", name, forbidden, body)
+			}
+		}
+	}
+}
+
+// A member never synced gets the sync-failed message with the stored reason
+// when a failure is recorded, and the not-synced message otherwise.
+func TestSharedGamesNeverSyncedMessageFollowsStoredFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure string
+		want    string
+		other   string
+	}{
+		{"failure recorded", "library unavailable", "Persona 503&#39;s game sync failed: library unavailable", "games not synced yet for user Persona 503"},
+		{"no failure recorded", "", "games not synced yet for user Persona 503", "game sync failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			caller := f.seed(callerID, []steamapi.Game{game(1)})
+			friend := f.user(friendB)
+			if tc.failure != "" {
+				if err := f.store.RecordSyncFailure(f.ctx, friend, tc.failure); err != nil {
+					t.Fatal(err)
+				}
+			}
+			body := f.partyPage(caller, friend)
+			if strings.Count(body, tc.want) != 1 {
+				t.Errorf("want %q once: %s", tc.want, body)
+			}
+			if strings.Contains(body, tc.other) {
+				t.Errorf("unexpected %q: %s", tc.other, body)
+			}
+		})
+	}
+}
+
+// A friend whose library fetch fails with a transport error carrying the API
+// key gets the failure message with the cause and without the key, whether the
+// reason was stored by this sync or is an old value that still holds the key.
+func TestSharedGamesFailureReasonRedactsSecret(t *testing.T) {
+	f := newSyncFixture(t)
+	caller := f.seed(callerID, []steamapi.Game{game(1)})
+	f.sgStamp(callerID, time.Hour)
+	friend := f.user(friendB)
+	f.steam.friends = []string{friendB}
+	f.steam.details = multiplayerDetails(1)
+	f.steam.gamesErr[friendB] = fmt.Errorf("steamapi: performing request: %w", &url.Error{
+		Op:  "Get",
+		URL: "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=SECRETKEY123&steamid=1",
+		Err: errors.New("dial tcp: connection refused"),
+	})
+	body := f.sharedGames(caller, friendB)
+	if strings.Contains(body, "SECRETKEY123") {
+		t.Fatalf("body leaks the key: %s", body)
+	}
+	if !regexp.MustCompile(`Persona 503&#39;s game sync failed: [^<]*connection refused`).MatchString(body) {
+		t.Fatalf("failure message missing: %s", body)
+	}
+	var stored string
+	if err := f.pool.QueryRow(f.ctx, `SELECT library_sync_error FROM users WHERE id = $1`, friend).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored, "SECRETKEY123") || !strings.Contains(stored, "connection refused") {
+		t.Fatalf("stored reason=%q", stored)
+	}
+
+	// An old stored value is scrubbed at render time.
+	// (not due: stamped an hour ago, failure recorded after it).
+	if _, err := f.pool.Exec(f.ctx, `UPDATE users SET library_synced_at = now() - interval '1 hour',
+		library_sync_error = 'old failure ?key=SECRETKEY123', library_sync_error_at = now() WHERE id = $1`, friend); err != nil {
+		t.Fatal(err)
+	}
+	body = f.sharedGames(caller, friendB)
+	if strings.Contains(body, "SECRETKEY123") || !strings.Contains(body, "old failure") {
+		t.Fatalf("old stored key not scrubbed: %s", body)
+	}
+}
+
+// CLM-7: while another holder has the friend's sync lock, Get shared games
+// waits for it, re-checks due-ness, makes no Steam call for the friend, and
+// renders the library the holder stored.
+func TestSharedGamesWaitsOnHeldUserLock(t *testing.T) {
+	f := newSyncFixture(t)
+	caller := f.seed(callerID, []steamapi.Game{game(1), game(2)})
+	f.sgStamp(callerID, time.Hour)
+	friend := f.user(friendA)
+	f.steam.friends = []string{friendA}
+	f.storeData(db.GameData{AppID: 1, HasData: true, Multiplayer: true}, db.GameData{AppID: 2, HasData: true, Multiplayer: true})
+	f.steam.details = failDetails(t)
+
+	const hold = 500 * time.Millisecond
+	locked, held := make(chan struct{}), make(chan error, 1)
+	var released time.Time
+	go func() {
+		held <- f.store.WithUserSyncLock(f.ctx, friend, func(ctx context.Context) error {
+			close(locked)
+			time.Sleep(hold)
+			if err := f.store.StoreUserLibrary(ctx, friend, []steamapi.Game{game(2)}); err != nil {
+				return err
+			}
+			if err := f.store.RecordSyncSuccess(ctx, friend); err != nil {
+				return err
+			}
+			released = time.Now()
+			return nil
+		})
+	}()
+	<-locked
+	body := f.sharedGames(caller, friendA)
+	returned := time.Now()
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	if f.steam.gamesCalled(friendA) {
+		t.Fatal("friend library fetched although another sync held the lock")
+	}
+	if returned.Before(released) {
+		t.Fatalf("returned %s before the lock holder finished", released.Sub(returned))
+	}
+	if got, want := sharedRendered(t, body), []renderedGame{{2, "Game 2", "icon2"}}; !slices.Equal(got, want) {
+		t.Fatalf("shared=%+v body=%s", got, body)
+	}
+}
+
+// sgBlockingSteam blocks Games for one user until release closes, counting
+// total and concurrent calls for that user.
+type sgBlockingSteam struct {
+	*gameSyncSteam
+	user            string
+	release         chan struct{}
+	countMu         sync.Mutex
+	total, now, max int
+}
+
+func (s *sgBlockingSteam) Games(ctx context.Context, steamID string, appInfo, freeGames bool) ([]steamapi.Game, error) {
+	if steamID == s.user {
+		s.countMu.Lock()
+		s.total++
+		s.now++
+		s.max = max(s.max, s.now)
+		s.countMu.Unlock()
+		defer func() {
+			s.countMu.Lock()
+			s.now--
+			s.countMu.Unlock()
+		}()
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.gameSyncSteam.Games(ctx, steamID, appInfo, freeGames)
+}
+
+func (s *sgBlockingSteam) counts() (total, maxConcurrent int) {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	return s.total, s.max
+}
+
+// CLM-6: two app instances on separate pools never sync the same due user
+// concurrently, and the second does not sync again.
+func TestSharedGamesSerializesWithSecondPool(t *testing.T) {
+	f := newSyncFixture(t)
+	callerOne := f.seed(callerID, []steamapi.Game{game(1)})
+	callerTwo := f.seed(friendB, []steamapi.Game{game(1)})
+	f.sgStamp(callerID, time.Hour)
+	f.sgStamp(friendB, time.Hour)
+	f.user(friendA) // the shared, due friend
+	f.steam.friends = []string{friendA}
+	f.steam.libraries[friendA] = []steamapi.Game{game(1)}
+	f.storeData(db.GameData{AppID: 1, HasData: true, Multiplayer: true})
+	f.steam.details = failDetails(t)
+
+	steam := &sgBlockingSteam{gameSyncSteam: f.steam, user: friendA, release: make(chan struct{})}
+	appOne := f.app
+	appOne.steam = func() view.SteamService { return steam }
+	appTwo := appOne
+	appTwo.store = f.sgSecondStore()
+
+	bodies := make([]string, 2)
+	var wg sync.WaitGroup
+	for i, run := range []struct {
+		app  *application
+		user int64
+	}{{&appOne, callerOne}, {&appTwo, callerTwo}} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body, err := f.sgSharedGames(run.app, run.user, friendA)
+			if err != nil {
+				t.Error(err)
+			}
+			bodies[i] = body
+		}()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for total, _ := steam.counts(); total == 0; total, _ = steam.counts() {
+		if time.Now().After(deadline) {
+			t.Fatal("friend library never fetched")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // give a second, unserialised sync time to start
+	close(steam.release)
+	wg.Wait()
+	if total, maxConcurrent := steam.counts(); total != 1 || maxConcurrent != 1 {
+		t.Fatalf("friend Games calls total=%d max concurrent=%d, want 1 and 1", total, maxConcurrent)
+	}
+	for i, body := range bodies {
+		if got, want := sharedRendered(t, body), []renderedGame{{1, "Game 1", "icon1"}}; !slices.Equal(got, want) {
+			t.Errorf("request %d shared=%+v body=%s", i, got, body)
+		}
 	}
 }

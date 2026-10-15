@@ -82,10 +82,15 @@ func SyncUserGames(ctx context.Context, steam GameSyncService, store GameSyncSto
 		appIDs[i] = game.AppID
 	}
 	if err := FetchMissingGameData(ctx, steam, store, appIDs); err != nil {
-		return fmt.Errorf("sync games %s: %w", steamID64, err)
+		return fmt.Errorf("sync games %s: %w: %w", steamID64, ErrGameDetails, err)
 	}
 	return nil
 }
+
+// ErrGameDetails marks a SyncUserGames error raised only by the game-data
+// fetch after the library was already stored; callers may treat the library
+// sync as successful.
+var ErrGameDetails = errors.New("fetch game details")
 
 // FetchMissingGameData requests GamesDetails only for the given app ids whose
 // games row has no stored data, in batches of gamesDetailsBatchSize with at

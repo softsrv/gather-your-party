@@ -34,6 +34,10 @@ type memUser struct {
 	state   string
 	library []int
 	profile steamapi.Player
+	// syncedAt is the last successful library sync; syncErr the last failure.
+	syncedAt *time.Time
+	syncErr  string
+	lock     sync.Mutex
 }
 
 func newMemStore() *memStore {
@@ -174,6 +178,53 @@ func (s *memStore) UpsertFriend(_ context.Context, steamID string, player steama
 	s.nextID++
 	s.users[steamID] = &memUser{id: s.nextID, state: db.GameSyncNeverSynced, profile: player}
 	return s.nextID, nil
+}
+
+func (s *memStore) userByID(userID int64) *memUser {
+	for _, u := range s.users {
+		if u.id == userID {
+			return u
+		}
+	}
+	return nil
+}
+
+func (s *memStore) LibrarySyncDue(_ context.Context, userID int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.userByID(userID)
+	return u == nil || u.syncedAt == nil || time.Since(*u.syncedAt) > 24*time.Hour, nil
+}
+
+func (s *memStore) RecordSyncSuccess(_ context.Context, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u := s.userByID(userID); u != nil {
+		now := time.Now()
+		u.syncedAt, u.syncErr = &now, ""
+	}
+	return nil
+}
+
+func (s *memStore) RecordSyncFailure(_ context.Context, userID int64, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u := s.userByID(userID); u != nil {
+		u.syncErr = reason
+	}
+	return nil
+}
+
+func (s *memStore) WithUserSyncLock(ctx context.Context, userID int64, fn func(context.Context) error) error {
+	s.mu.Lock()
+	u := s.userByID(userID)
+	s.mu.Unlock()
+	if u == nil {
+		return fn(ctx)
+	}
+	u.lock.Lock()
+	defer u.lock.Unlock()
+	return fn(ctx)
 }
 
 // steamStub is a SteamService double; unset funcs fail the call.
