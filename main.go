@@ -42,6 +42,7 @@ type appConfig struct {
 
 type sessionStore interface {
 	UpsertUser(context.Context, string, steamapi.Player) (int64, error)
+	UpsertFriend(context.Context, string, steamapi.Player) (int64, error)
 	CreateSession(context.Context, int64) (string, error)
 	ResolveSession(context.Context, string) (string, bool, error)
 	DeleteSession(context.Context, string) error
@@ -780,6 +781,20 @@ func (app *application) handleStepDown(ctx *middleware.CustomContext, w http.Res
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// isSteamID64 reports whether s is a 17-digit decimal SteamID64, the form
+// Steam friend lists and the invite picker carry.
+func isSteamID64(s string) bool {
+	if len(s) != 17 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
 	if !ok {
@@ -789,14 +804,120 @@ func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.R
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	targetID, err := strconv.ParseInt(r.PostForm.Get("target"), 10, 64)
-	if err != nil {
+	// The target is the friend's SteamID64; the users row is resolved (or
+	// created for a friend who never signed in) only after the checks below.
+	targetSteamID := r.PostForm.Get("target")
+	if !isSteamID64(targetSteamID) {
 		http.Error(w, "invalid target", http.StatusBadRequest)
 		return
 	}
-	if err := app.store.SendInvite(r.Context(), partyID, actingUserID, targetID); err != nil {
+	partyPage := "/parties/" + partyID
+	refuse := func() { http.Redirect(w, r, partyPage, http.StatusSeeOther) }
+
+	members, err := app.store.PartyMembers(r.Context(), partyID)
+	if err != nil {
 		http.Error(w, "unable to send invite", http.StatusInternalServerError)
 		return
+	}
+	isLeader := false
+	for _, member := range members {
+		if member.UserID == actingUserID && member.IsLeader {
+			isLeader = true
+		}
+		if member.SteamID64 == targetSteamID {
+			// Already a member: nothing to write, not even the users row.
+			refuse()
+			return
+		}
+	}
+	if !isLeader {
+		refuse()
+		return
+	}
+
+	leaderSteamID, _ := ctx.Value(middleware.SteamID{}).(string)
+	steamCtx, cancelSteam := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancelSteam()
+	service := app.steamService()()
+	friends, err := service.Friends(steamCtx, leaderSteamID)
+	if err != nil {
+		fmt.Printf("send invite: friends: %s\n", err)
+		http.Error(w, "unable to verify Steam friends", http.StatusBadGateway)
+		return
+	}
+	isFriend := false
+	for _, friend := range friends {
+		if friend.SteamID == targetSteamID {
+			isFriend = true
+			break
+		}
+	}
+	if !isFriend {
+		refuse()
+		return
+	}
+	// An existing users row is reused as is: the add never rewrites a stored
+	// profile, so a signed-in friend's row (or a refused target's) is untouched.
+	targetID, found, err := app.store.ResolveUserID(r.Context(), targetSteamID)
+	if err != nil {
+		http.Error(w, "unable to send invite", http.StatusInternalServerError)
+		return
+	}
+	if found {
+		for _, member := range members {
+			if member.UserID == targetID {
+				refuse()
+				return
+			}
+		}
+		pending, err := app.store.UserPendingInvites(r.Context(), targetID)
+		if err != nil {
+			http.Error(w, "unable to send invite", http.StatusInternalServerError)
+			return
+		}
+		for _, invite := range pending {
+			if invite.PartyID == partyID {
+				// Already invited: nothing to write.
+				refuse()
+				return
+			}
+		}
+	} else {
+		profile := steamapi.Player{SteamID: targetSteamID}
+		players, err := service.Players(steamCtx, []string{targetSteamID})
+		if err != nil {
+			fmt.Printf("send invite: players: %s\n", err)
+			http.Error(w, "unable to load Steam profile", http.StatusBadGateway)
+			return
+		}
+		for _, player := range players {
+			if player.SteamID == targetSteamID {
+				profile = player
+			}
+		}
+		// Only a friend with no row yet is created here; UpsertFriend is
+		// conflict-safe on steam_id_64 and marks the new row never logged in.
+		targetID, err = app.store.UpsertFriend(r.Context(), targetSteamID, profile)
+		if err != nil {
+			http.Error(w, "unable to send invite", http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := app.store.SendInvite(r.Context(), partyID, actingUserID, targetID); err != nil {
+		if errors.Is(err, db.ErrNotLeader) || errors.Is(err, db.ErrAlreadyMember) || errors.Is(err, db.ErrInvitePending) {
+			refuse()
+			return
+		}
+		http.Error(w, "unable to send invite", http.StatusInternalServerError)
+		return
+	}
+	// A friend who never signed in is added directly (SendInvite committed the
+	// membership); a signed-in friend only has a pending invite. Only the
+	// former is synced here, after the membership transaction has committed.
+	if added, err := app.store.IsMember(r.Context(), partyID, targetID); err != nil {
+		fmt.Printf("send invite: check added member %s: %s\n", targetSteamID, err)
+	} else if added {
+		app.syncAddedMember(r.Context(), targetID, targetSteamID)
 	}
 	if r.Header.Get("HX-Request") == "true" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -804,6 +925,42 @@ func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.R
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// syncAddedMember syncs the owned games of a member just added to a party, so
+// the next party page can compute shared games with them. It runs under the
+// user's sync lock and only when their library sync is due. The outcome is
+// recorded like any library sync (a game-details failure alone counts as
+// success); every error is logged and none is returned, so a failed sync never
+// undoes or fails the add.
+func (app *application) syncAddedMember(ctx context.Context, userID int64, steamID string) {
+	timeout := app.librarySyncTimeout
+	if timeout <= 0 {
+		timeout = defaultLibrarySyncTimeout
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	steam := app.steamService()()
+	err := app.store.WithUserSyncLock(syncCtx, userID, func(lockCtx context.Context) error {
+		// Every store call below uses lockCtx, so it runs on the lock connection.
+		due, err := app.store.LibrarySyncDue(lockCtx, userID)
+		if err != nil {
+			return err
+		}
+		if !due {
+			return nil
+		}
+		syncErr := view.SyncUserGames(lockCtx, steam, app.store, userID, steamID)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(lockCtx), 5*time.Second)
+		defer cancelRecord()
+		if syncErr == nil || errors.Is(syncErr, view.ErrGameDetails) {
+			return errors.Join(syncErr, app.store.RecordSyncSuccess(recordCtx, userID))
+		}
+		return errors.Join(syncErr, app.store.RecordSyncFailure(recordCtx, userID, syncreason.Reason(syncErr)))
+	})
+	if err != nil {
+		fmt.Printf("send invite: sync added member %s: %s\n", steamID, err)
+	}
 }
 
 func (app *application) handleAcceptInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {

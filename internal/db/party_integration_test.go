@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -672,10 +673,20 @@ func TestSendInviteConcurrentDuplicate(t *testing.T) {
 		go func() { <-start; results <- store.SendInvite(ctx, party, leader, target) }()
 	}
 	close(start)
+	var nilCount, pendingCount int
 	for i := 0; i < 2; i++ {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+		err := <-results
+		switch {
+		case err == nil:
+			nilCount++
+		case errors.Is(err, ErrInvitePending):
+			pendingCount++
+		default:
+			t.Fatalf("unexpected error from SendInvite: %v", err)
 		}
+	}
+	if nilCount != 1 || pendingCount != 1 {
+		t.Fatalf("expected 1 nil and 1 ErrInvitePending, got %d nil and %d pending", nilCount, pendingCount)
 	}
 	assertInviteCount(t, pool, ctx, party, target, 1)
 	var inviter int64
@@ -804,14 +815,18 @@ func TestInviteCandidatesIntersectionAndExclusions(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Eligibility is party-scoped: another party's member/pending invite must not exclude.
-	other, err := store.CreateParty(ctx, nonfriend, "Other")
+	otherMemberParty, err := store.CreateParty(ctx, nonfriend, "Other Member Party")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id) VALUES ($1,$2)`, other, eligible); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id) VALUES ($1,$2)`, otherMemberParty, eligible); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SendInvite(ctx, other, nonfriend, eligible); err != nil {
+	otherInviteParty, err := store.CreateParty(ctx, nonfriend, "Other Invite Party")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendInvite(ctx, otherInviteParty, nonfriend, eligible); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE users SET avatar_medium = 'https://example.com/eligible.jpg' WHERE id = $1`, eligible); err != nil {
@@ -822,7 +837,9 @@ func TestInviteCandidatesIntersectionAndExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != (InviteCandidate{UserID: eligible, Name: "Party member", AvatarURL: "https://example.com/eligible.jpg"}) || got[1] != (InviteCandidate{UserID: rejected, Name: "Party member"}) {
+	want0 := InviteCandidate{UserID: eligible, SteamID: steamIDs[3], Name: "Party member", AvatarURL: "https://example.com/eligible.jpg"}
+	want1 := InviteCandidate{UserID: rejected, SteamID: steamIDs[5], Name: "Party member"}
+	if len(got) != 2 || got[0] != want0 || got[1] != want1 {
 		t.Fatalf("candidates=%+v", got)
 	}
 	if got, err := store.InviteCandidates(ctx, party, leader, nil); err != nil || len(got) != 0 {
@@ -875,38 +892,148 @@ func TestAcceptInviteRollsBackOnSecondWriteFailure(t *testing.T) {
 	}
 }
 
-// Games CLM-16: a friend recorded by another user's sync who never signed in is
-// not an invite candidate, and the flag alone is what excludes them.
-func TestInviteCandidatesExcludeNeverLoggedIn(t *testing.T) {
+// CLM-2: a friend recorded by another user's sync who never signed in IS
+// an invite candidate alongside signed-in friends; the ever_logged_in flag does not exclude them.
+// Friends who are members or have pending invites are excluded.
+func TestInviteCandidatesIncludeNeverSignedIn(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
-	const leaderSteamID, loggedInSteamID, friendOnlySteamID = "76561198000017001", "76561198000017002", "76561198000017003"
+	const (
+		leaderSteamID      = "76561198000017001"
+		loggedInSteamID    = "76561198000017002"
+		neverSignedInSteam = "76561198000017003"
+		memberSteamID      = "76561198000017004"
+		pendingSteamID     = "76561198000017005"
+		noRowSteamID       = "76561198000017006"
+	)
 	leader := partyTestUser(t, store, ctx, leaderSteamID)
 	loggedIn := partyTestUser(t, store, ctx, loggedInSteamID)
-	friendOnly, err := store.UpsertFriend(ctx, friendOnlySteamID, steamapi.Player{PersonaName: "Friend only"})
+	neverSignedIn, err := store.UpsertFriend(ctx, neverSignedInSteam, steamapi.Player{PersonaName: "Never signed in"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	party, err := store.CreateParty(ctx, leader, "Flagged")
+	member := partyTestUser(t, store, ctx, memberSteamID)
+	pending := partyTestUser(t, store, ctx, pendingSteamID)
+
+	party, err := store.CreateParty(ctx, leader, "Inclusion Party")
 	if err != nil {
 		t.Fatal(err)
 	}
-	friends := []string{loggedInSteamID, friendOnlySteamID}
+
+	// Add member to party memberships
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
+	// Add pending invite
+	if err := store.SendInvite(ctx, party, leader, pending); err != nil {
+		t.Fatal(err)
+	}
+
+	friends := []string{loggedInSteamID, neverSignedInSteam, memberSteamID, pendingSteamID, noRowSteamID}
 	got, err := store.InviteCandidates(ctx, party, leader, friends)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].UserID != loggedIn {
-		t.Fatalf("candidates=%+v want only %d", got, loggedIn)
+
+	// From the database query, only users with a users row who are not self, not member, and not pending are returned: loggedIn and neverSignedIn.
+	// noRowSteamID has no user row, member is excluded by memberships, pending is excluded by invites.
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2: %+v", len(got), got)
 	}
-	// Ignoring the flag (here by setting it), the friend-created row matches every other condition.
-	if _, err := pool.Exec(ctx, `UPDATE users SET ever_logged_in = true WHERE id = $1`, friendOnly); err != nil {
+	gotIDs := map[int64]string{
+		got[0].UserID: got[0].SteamID,
+		got[1].UserID: got[1].SteamID,
+	}
+	if gotIDs[loggedIn] != loggedInSteamID {
+		t.Errorf("expected candidate loggedIn user ID %d steamID %s, got %+v", loggedIn, loggedInSteamID, gotIDs)
+	}
+	if gotIDs[neverSignedIn] != neverSignedInSteam {
+		t.Errorf("expected candidate neverSignedIn user ID %d steamID %s, got %+v", neverSignedIn, neverSignedInSteam, gotIDs)
+	}
+}
+
+// Invite CLM-2: verify exclusions (members and pending invitees) returned by InviteExclusions.
+func TestInviteExclusions(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	const (
+		leaderSteamID    = "76561198000018001"
+		memberSteamID    = "76561198000018002"
+		pendingSteamID   = "76561198000018003"
+		eligibleSignedID = "76561198000018004"
+		eligibleNeverID  = "76561198000018005"
+		noRowSteamID     = "76561198000018006"
+		rejectedSteamID  = "76561198000018007"
+	)
+	leader := partyTestUser(t, store, ctx, leaderSteamID)
+	member := partyTestUser(t, store, ctx, memberSteamID)
+	pending := partyTestUser(t, store, ctx, pendingSteamID)
+	partyTestUser(t, store, ctx, eligibleSignedID)
+	if _, err := store.UpsertFriend(ctx, eligibleNeverID, steamapi.Player{PersonaName: "Never signed in"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err = store.InviteCandidates(ctx, party, leader, friends)
+	rejected := partyTestUser(t, store, ctx, rejectedSteamID)
+
+	party, err := store.CreateParty(ctx, leader, "Exclusions Party")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].UserID != loggedIn || got[1].UserID != friendOnly {
-		t.Fatalf("candidates with flag set=%+v", got)
+
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, party, member); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendInvite(ctx, party, leader, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendInvite(ctx, party, leader, rejected); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RejectInvite(ctx, party, rejected); err != nil {
+		t.Fatal(err)
+	}
+
+	allFriends := []string{
+		leaderSteamID,
+		memberSteamID,
+		pendingSteamID,
+		eligibleSignedID,
+		eligibleNeverID,
+		noRowSteamID,
+		rejectedSteamID,
+	}
+
+	excl, err := store.InviteExclusions(ctx, party, allFriends)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exclSet := make(map[string]bool)
+	for _, id := range excl {
+		exclSet[id] = true
+	}
+
+	if !exclSet[leaderSteamID] {
+		t.Errorf("expected leader %s to be excluded", leaderSteamID)
+	}
+	if !exclSet[memberSteamID] {
+		t.Errorf("expected member %s to be excluded", memberSteamID)
+	}
+	if !exclSet[pendingSteamID] {
+		t.Errorf("expected pending invitee %s to be excluded", pendingSteamID)
+	}
+	if exclSet[eligibleSignedID] {
+		t.Errorf("eligible signed-in user %s should not be excluded", eligibleSignedID)
+	}
+	if exclSet[eligibleNeverID] {
+		t.Errorf("eligible never signed-in user %s should not be excluded", eligibleNeverID)
+	}
+	if exclSet[noRowSteamID] {
+		t.Errorf("no-row user %s should not be excluded", noRowSteamID)
+	}
+	if exclSet[rejectedSteamID] {
+		t.Errorf("rejected invitee %s should not be excluded", rejectedSteamID)
+	}
+
+	emptyExcl, err := store.InviteExclusions(ctx, party, nil)
+	if err != nil || len(emptyExcl) != 0 {
+		t.Errorf("empty friends returned %v, err %v", emptyExcl, err)
 	}
 }
