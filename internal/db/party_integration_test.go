@@ -255,6 +255,21 @@ func TestCreatePartyLeaderAndSoleMember(t *testing.T) {
 	if err != nil || second == id || second == "" {
 		t.Fatalf("fresh party=%q, err=%v", second, err)
 	}
+
+	// Negative control: a party row with no memberships row returns zero
+	// members from PartyMembers. This proves PartyMembers relies on the
+	// memberships row that CreateParty atomically inserts.
+	var partyWithoutMembers string
+	if err := pool.QueryRow(ctx, `INSERT INTO parties (leader_id, name) VALUES ($1, $2) RETURNING id`, leader, "Unjoined party").Scan(&partyWithoutMembers); err != nil {
+		t.Fatalf("insert party without members: %v", err)
+	}
+	emptyMembers, err := store.PartyMembers(ctx, partyWithoutMembers)
+	if err != nil {
+		t.Fatalf("PartyMembers on unjoined party: %v", err)
+	}
+	if len(emptyMembers) != 0 {
+		t.Fatalf("expected 0 members for party without memberships, got %d (%+v)", len(emptyMembers), emptyMembers)
+	}
 }
 
 func TestCreatePartyRollsBackMembershipFailure(t *testing.T) {
