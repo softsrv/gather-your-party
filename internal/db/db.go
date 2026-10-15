@@ -440,9 +440,11 @@ var (
 	ErrInvitePending = errors.New("send invite: target already has a pending invite")
 )
 
-// SendInvite records an invitation only for the current leader. A user can be
-// invited again after rejecting. Locking the party serializes this with replies
-// and leadership changes.
+// SendInvite records an invitation only for the current leader. A signed-in
+// target gets a pending invite they accept or reject themselves, and can be
+// invited again after rejecting. A target who has never signed in is joined at
+// once (accepted invite plus membership). Locking the party serializes this
+// with replies and leadership changes.
 func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error {
 	q, done := s.querier(ctx)
 	defer done()
@@ -474,6 +476,26 @@ func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUser
 	}
 	if hasPending {
 		return ErrInvitePending
+	}
+
+	var everLoggedIn bool
+	if err := tx.QueryRow(ctx, `SELECT ever_logged_in FROM users WHERE id = $1`, targetUserID).Scan(&everLoggedIn); err != nil {
+		return fmt.Errorf("send invite: lookup target: %w", err)
+	}
+	if !everLoggedIn {
+		// A friend who has never signed in cannot accept, so the leader's add
+		// joins them directly: an accepted invite and the membership, written
+		// under the same party lock as AcceptInvite.
+		if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'accepted')`, partyID, targetUserID, actingLeaderUserID); err != nil {
+			return fmt.Errorf("send invite: insert accepted invite: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, partyID, targetUserID); err != nil {
+			return fmt.Errorf("send invite: create membership: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit send invite: %w", err)
+		}
+		return nil
 	}
 
 	if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'pending')`, partyID, targetUserID, actingLeaderUserID); err != nil {
