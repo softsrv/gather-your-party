@@ -22,6 +22,9 @@ import (
 
 type inviteFriendsService interface {
 	Friends(context.Context, string) ([]steamapi.Friend, error)
+}
+
+type invitePlayersService interface {
 	Players(context.Context, []string) ([]steamapi.Player, error)
 }
 
@@ -67,21 +70,23 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 		}
 	}
 	if len(missing) > 0 {
-		players, err := service.Players(ctx, missing)
-		if err != nil {
-			return nil, fmt.Errorf("invite picker: players: %w", err)
-		}
-		for _, player := range players {
-			avatar := player.AvatarMedium
-			if avatar == "" {
-				avatar = player.AvatarSmall
+		if playerService, ok := service.(invitePlayersService); ok {
+			players, err := playerService.Players(ctx, missing)
+			if err != nil {
+				return nil, fmt.Errorf("invite picker: players: %w", err)
 			}
-			candidates = append(candidates, component.InviteCandidate{
-				UserID:    0,
-				SteamID:   player.SteamID,
-				Name:      player.PersonaName,
-				AvatarURL: avatar,
-			})
+			for _, player := range players {
+				avatar := player.AvatarMedium
+				if avatar == "" {
+					avatar = player.AvatarSmall
+				}
+				candidates = append(candidates, component.InviteCandidate{
+					UserID:    0,
+					SteamID:   player.SteamID,
+					Name:      player.PersonaName,
+					AvatarURL: avatar,
+				})
+			}
 		}
 	}
 	return candidates, nil

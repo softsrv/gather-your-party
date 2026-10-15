@@ -51,20 +51,32 @@ func (s *inviteCandidatesStub) InviteCandidates(_ context.Context, partyID strin
 
 func TestBuildInviteCandidates(t *testing.T) {
 	service := &inviteFriendsStub{
-		friends: []steamapi.Friend{{SteamID: "76561198000000002"}, {SteamID: "76561198000000003"}},
-		players: []steamapi.Player{{SteamID: "76561198000000003", PersonaName: "Live player", AvatarMedium: "https://example.com/avatar.jpg"}},
+		friends: []steamapi.Friend{
+			{SteamID: "76561198000000001"},
+			{SteamID: "76561198000000002"},
+			{SteamID: "76561198000000003"},
+		},
+		players: []steamapi.Player{
+			{SteamID: "76561198000000003", PersonaName: "Live player C", AvatarMedium: "https://example.com/avatar-c.jpg"},
+		},
 	}
-	store := &inviteCandidatesStub{candidates: []db.InviteCandidate{{UserID: 987, SteamID: "76561198000000002", Name: "Stored name"}}}
-	got, err := BuildInviteCandidates(context.Background(), service, store, "party", 123, "76561198000000001")
+	store := &inviteCandidatesStub{
+		candidates: []db.InviteCandidate{
+			{UserID: 101, SteamID: "76561198000000001", Name: "Stored A", AvatarURL: "https://example.com/avatar-a.jpg"},
+			{UserID: 102, SteamID: "76561198000000002", Name: "Stored B", AvatarURL: "https://example.com/avatar-b.jpg"},
+		},
+	}
+	got, err := BuildInviteCandidates(context.Background(), service, store, "party", 123, "76561198000000099")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if service.steamID != "76561198000000001" || store.calls != 1 || store.partyID != "party" || store.actor != 123 || !reflect.DeepEqual(store.friends, []string{"76561198000000002", "76561198000000003"}) {
+	if service.steamID != "76561198000000099" || store.calls != 1 || store.partyID != "party" || store.actor != 123 || !reflect.DeepEqual(store.friends, []string{"76561198000000001", "76561198000000002", "76561198000000003"}) {
 		t.Fatalf("incorrect identity or lookup: service=%+v store=%+v", service, store)
 	}
 	want := []component.InviteCandidate{
-		{UserID: 987, SteamID: "76561198000000002", Name: "Stored name"},
-		{UserID: 0, SteamID: "76561198000000003", Name: "Live player", AvatarURL: "https://example.com/avatar.jpg"},
+		{UserID: 101, SteamID: "76561198000000001", Name: "Stored A", AvatarURL: "https://example.com/avatar-a.jpg"},
+		{UserID: 102, SteamID: "76561198000000002", Name: "Stored B", AvatarURL: "https://example.com/avatar-b.jpg"},
+		{UserID: 0, SteamID: "76561198000000003", Name: "Live player C", AvatarURL: "https://example.com/avatar-c.jpg"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("picker model=%+v want=%+v", got, want)

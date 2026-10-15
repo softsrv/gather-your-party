@@ -822,7 +822,9 @@ func TestInviteCandidatesIntersectionAndExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != (InviteCandidate{UserID: eligible, Name: "Party member", AvatarURL: "https://example.com/eligible.jpg"}) || got[1] != (InviteCandidate{UserID: rejected, Name: "Party member"}) {
+	want0 := InviteCandidate{UserID: eligible, SteamID: steamIDs[3], Name: "Party member", AvatarURL: "https://example.com/eligible.jpg"}
+	want1 := InviteCandidate{UserID: rejected, SteamID: steamIDs[5], Name: "Party member"}
+	if len(got) != 2 || got[0] != want0 || got[1] != want1 {
 		t.Fatalf("candidates=%+v", got)
 	}
 	if got, err := store.InviteCandidates(ctx, party, leader, nil); err != nil || len(got) != 0 {
@@ -932,4 +934,10 @@ func TestInviteCandidatesIncludeNeverSignedIn(t *testing.T) {
 	if gotIDs[neverSignedIn] != neverSignedInSteam {
 		t.Errorf("expected candidate neverSignedIn user ID %d steamID %s, got %+v", neverSignedIn, neverSignedInSteam, gotIDs)
 	}
+}
+
+// TestInviteCandidatesExcludeNeverLoggedIn is an alias for TestInviteCandidatesIncludeNeverSignedIn,
+// verifying inclusion when run under the previous test name.
+func TestInviteCandidatesExcludeNeverLoggedIn(t *testing.T) {
+	TestInviteCandidatesIncludeNeverSignedIn(t)
 }
