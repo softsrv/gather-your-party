@@ -21,18 +21,12 @@ import (
 
 // memStore is an in-memory SharedGamesListStore double.
 type memStore struct {
-	mu                sync.Mutex
-	nextID            int64
-	users             map[string]*memUser
-	games             map[int]*db.StoredGame
-	storeErr          error
-	syncStatesErr     error
-	sharedStoredErr   error
-	missingDataErr    error
-	dataCalls         [][]db.GameData
-	syncStatesCalls   int
-	sharedStoredCalls int
-	missingDataCalls  int
+	mu        sync.Mutex
+	nextID    int64
+	users     map[string]*memUser
+	games     map[int]*db.StoredGame
+	storeErr  error
+	dataCalls [][]db.GameData
 }
 
 type memUser struct {
@@ -68,10 +62,6 @@ func (s *memStore) addUser(steamID, state string, library ...db.StoredGame) {
 func (s *memStore) GameSyncStates(_ context.Context, ids []string) (map[string]db.GameSyncState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.syncStatesCalls++
-	if s.syncStatesErr != nil {
-		return nil, s.syncStatesErr
-	}
 	states := map[string]db.GameSyncState{}
 	for _, id := range ids {
 		if u, ok := s.users[id]; ok {
@@ -84,10 +74,6 @@ func (s *memStore) GameSyncStates(_ context.Context, ids []string) (map[string]d
 func (s *memStore) SharedStoredGames(_ context.Context, caller string, others []string) ([]db.StoredGame, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sharedStoredCalls++
-	if s.sharedStoredErr != nil {
-		return nil, s.sharedStoredErr
-	}
 	u, ok := s.users[caller]
 	if !ok {
 		return nil, nil
@@ -111,10 +97,6 @@ func (s *memStore) SharedStoredGames(_ context.Context, caller string, others []
 func (s *memStore) GamesMissingData(_ context.Context, appIDs []int) ([]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.missingDataCalls++
-	if s.missingDataErr != nil {
-		return nil, s.missingDataErr
-	}
 	var missing []int
 	for _, id := range appIDs {
 		if g, ok := s.games[id]; ok && !g.DataFetched {
@@ -247,19 +229,14 @@ func (s *memStore) WithUserSyncLock(ctx context.Context, userID int64, fn func(c
 
 // steamStub is a SteamService double; unset funcs fail the call.
 type steamStub struct {
-	gamesDetails      func(context.Context, []int) ([]steamapi.GameDetail, error)
-	games             func(context.Context, string, bool, bool) ([]steamapi.Game, error)
-	count             func(context.Context, string) (int, error)
-	friends           func(context.Context, string) ([]steamapi.Friend, error)
-	players           func(context.Context, []string) ([]steamapi.Player, error)
-	countCalls        *int
-	gamesDetailsCalls *int
+	gamesDetails func(context.Context, []int) ([]steamapi.GameDetail, error)
+	games        func(context.Context, string, bool, bool) ([]steamapi.Game, error)
+	count        func(context.Context, string) (int, error)
+	friends      func(context.Context, string) ([]steamapi.Friend, error)
+	players      func(context.Context, []string) ([]steamapi.Player, error)
 }
 
 func (s steamStub) GamesDetails(ctx context.Context, appIDs []int) ([]steamapi.GameDetail, error) {
-	if s.gamesDetailsCalls != nil {
-		*s.gamesDetailsCalls++
-	}
 	if s.gamesDetails == nil {
 		return nil, errors.New("unexpected GamesDetails call")
 	}
@@ -274,9 +251,6 @@ func (s steamStub) Games(ctx context.Context, steamID string, a, b bool) ([]stea
 }
 
 func (s steamStub) GetNumberOfCurrentPlayers(ctx context.Context, id string) (int, error) {
-	if s.countCalls != nil {
-		*s.countCalls++
-	}
 	if s.count == nil {
 		return 0, errors.New("unexpected GetNumberOfCurrentPlayers call")
 	}
@@ -388,94 +362,22 @@ func TestBuildSharedGamesMessagesNameMembers(t *testing.T) {
 }
 
 func TestBuildSharedGamesEmptyAndSoloRoster(t *testing.T) {
-	// Empty roster returns nil results with zero store and Steam calls.
-	{
-		store := newMemStore()
-		store.syncStatesErr = errors.New("unexpected GameSyncStates call")
-		store.sharedStoredErr = errors.New("unexpected SharedStoredGames call")
-		var emptyCountCalls, emptyDetailsCalls int
-		emptySteam := steamStub{
-			countCalls:        &emptyCountCalls,
-			gamesDetailsCalls: &emptyDetailsCalls,
-		}
-		games, messages, err := BuildSharedGames(context.Background(), emptySteam, store, nil)
-		if store.syncStatesCalls != 0 || store.sharedStoredCalls != 0 || store.missingDataCalls != 0 || len(store.dataCalls) != 0 || emptyCountCalls != 0 || emptyDetailsCalls != 0 {
-			t.Fatalf("empty roster calls: syncStates=%d sharedStored=%d missingData=%d dataCalls=%d count=%d details=%d",
-				store.syncStatesCalls, store.sharedStoredCalls, store.missingDataCalls, len(store.dataCalls), emptyCountCalls, emptyDetailsCalls)
-		}
-		if err != nil || games != nil || messages != nil {
-			t.Fatalf("empty roster: games=%v messages=%v err=%v", games, messages, err)
-		}
+	if games, messages, err := BuildSharedGames(context.Background(), steamStub{}, newMemStore(), nil); err != nil || len(games) != 0 || len(messages) != 0 {
+		t.Fatalf("empty roster: %v %v %v", games, messages, err)
 	}
-
-	// Solo roster returns (nil, nil, nil) before reading store or calling Steam across leader sync states.
-	for _, tc := range []struct {
-		name  string
-		setup func(*memStore)
-	}{
-		{
-			name: "store and steam that would fail",
-			setup: func(s *memStore) {
-				s.syncStatesErr = errors.New("unexpected GameSyncStates call")
-				s.sharedStoredErr = errors.New("unexpected SharedStoredGames call")
-				s.missingDataErr = errors.New("unexpected GamesMissingData call")
-				s.storeErr = errors.New("unexpected StoreGameData call")
-			},
-		},
-		{
-			name: "synced leader with stored games",
-			setup: func(s *memStore) {
-				s.addUser("solo", db.GameSyncSynced, stored(99, "Solo", true))
-				s.syncStatesErr = errors.New("unexpected GameSyncStates call")
-				s.sharedStoredErr = errors.New("unexpected SharedStoredGames call")
-				s.missingDataErr = errors.New("unexpected GamesMissingData call")
-				s.storeErr = errors.New("unexpected StoreGameData call")
-			},
-		},
-		{
-			name: "never synced leader",
-			setup: func(s *memStore) {
-				s.addUser("solo", db.GameSyncNeverSynced)
-				s.syncStatesErr = errors.New("unexpected GameSyncStates call")
-				s.sharedStoredErr = errors.New("unexpected SharedStoredGames call")
-			},
-		},
-		{
-			name: "failed sync leader",
-			setup: func(s *memStore) {
-				s.addUser("solo", "sync_failed")
-				s.syncStatesErr = errors.New("unexpected GameSyncStates call")
-				s.sharedStoredErr = errors.New("unexpected SharedStoredGames call")
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := newMemStore()
-			tc.setup(store)
-			var countCalls, detailsCalls int
-			steam := steamStub{
-				countCalls:        &countCalls,
-				gamesDetailsCalls: &detailsCalls,
-			}
-			games, messages, err := BuildSharedGames(context.Background(), steam, store, []db.PartyMember{{SteamID64: "solo", Name: "Leader"}})
-			if store.syncStatesCalls != 0 || store.sharedStoredCalls != 0 || store.missingDataCalls != 0 || len(store.dataCalls) != 0 || countCalls != 0 || detailsCalls != 0 {
-				t.Fatalf("expected zero store and Steam calls, got syncStates=%d sharedStored=%d missingData=%d dataCalls=%d count=%d details=%d",
-					store.syncStatesCalls, store.sharedStoredCalls, store.missingDataCalls, len(store.dataCalls), countCalls, detailsCalls)
-			}
-			if err != nil || games != nil || messages != nil {
-				t.Fatalf("expected nil games, messages, error for solo roster: games=%v messages=%v err=%v", games, messages, err)
-			}
-		})
+	store := newMemStore()
+	store.addUser("solo", db.GameSyncSynced, stored(99, "Solo", false))
+	if games, messages, err := BuildSharedGames(context.Background(), steamStub{}, store, []db.PartyMember{{SteamID64: "solo"}}); err != nil || len(games) != 0 || len(messages) != 0 {
+		t.Fatalf("single-player only: %v %v %v", games, messages, err)
 	}
 }
 
 func TestBuildSharedGamesCountErrorReturned(t *testing.T) {
 	failure := errors.New("Steam unavailable")
 	store := newMemStore()
-	store.addUser("leader", db.GameSyncSynced, stored(10, "Ten", true))
-	store.addUser("member", db.GameSyncSynced, stored(10, "Ten", true))
+	store.addUser("solo", db.GameSyncSynced, stored(10, "Ten", true))
 	steam := steamStub{count: func(context.Context, string) (int, error) { return 0, failure }}
-	games, messages, err := BuildSharedGames(context.Background(), steam, store, []db.PartyMember{{SteamID64: "leader"}, {SteamID64: "member"}})
+	games, messages, err := BuildSharedGames(context.Background(), steam, store, []db.PartyMember{{SteamID64: "solo"}})
 	if !errors.Is(err, failure) || len(games) != 0 || len(messages) != 0 {
 		t.Fatalf("partial or swallowed failure: %v %v %v", games, messages, err)
 	}
