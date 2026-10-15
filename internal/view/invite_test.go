@@ -161,6 +161,30 @@ func TestBuildInviteCandidatesPlayersErrorBestEffort(t *testing.T) {
 	}
 }
 
+func TestBuildInviteCandidatesExcludesLeaderBySteamID(t *testing.T) {
+	const leader = "76561198000000099"
+	service := &inviteFriendsStub{
+		friends: []steamapi.Friend{{SteamID: leader}, {SteamID: "76561198000000001"}},
+		players: []steamapi.Player{{SteamID: leader, PersonaName: "Leader"}, {SteamID: "76561198000000001", PersonaName: "Friend"}},
+	}
+	store := &inviteCandidatesStub{}
+	got, err := BuildInviteCandidates(context.Background(), service, store, "party", 123, leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got {
+		if c.SteamID == leader {
+			t.Fatalf("leader listed as own candidate: %+v", got)
+		}
+	}
+	if len(got) != 1 || got[0].SteamID != "76561198000000001" {
+		t.Fatalf("candidates=%+v", got)
+	}
+	if !reflect.DeepEqual(store.friends, []string{"76561198000000001"}) {
+		t.Fatalf("store friends=%v", store.friends)
+	}
+}
+
 func TestBuildInviteCandidatesExclusionsNotReadded(t *testing.T) {
 	service := &inviteFriendsStub{
 		friends: []steamapi.Friend{

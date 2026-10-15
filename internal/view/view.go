@@ -48,6 +48,11 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 	}
 	friendIDs := make([]string, 0, len(friends))
 	for _, friend := range friends {
+		// The leader is never their own candidate, whether or not they hold a
+		// membership row; match on Steam id so a users row is not required.
+		if friend.SteamID == verifiedSteamID {
+			continue
+		}
 		friendIDs = append(friendIDs, friend.SteamID)
 	}
 	known, err := store.InviteCandidates(ctx, partyID, actingLeaderUserID, friendIDs)
@@ -78,6 +83,12 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 			seen[candidate.SteamID] = struct{}{}
 		}
 	}
+	// Friends lacking a users row are presented from their Steam profile; a
+	// service that cannot look profiles up lists registered friends only.
+	playerService, canLookUpPlayers := service.(invitePlayersService)
+	if !canLookUpPlayers {
+		return candidates, nil
+	}
 	var missing []string
 	for _, friendID := range friendIDs {
 		if _, ok := seen[friendID]; ok {
@@ -91,14 +102,10 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 		missing = append(missing, friendID)
 	}
 	if len(missing) > 0 {
-		var players []steamapi.Player
-		if playerService, ok := service.(invitePlayersService); ok {
-			var err error
-			players, err = playerService.Players(ctx, missing)
-			if err != nil {
-				fmt.Printf("invite picker: players lookup error for %v: %v\n", missing, err)
-				players = nil
-			}
+		players, err := playerService.Players(ctx, missing)
+		if err != nil {
+			fmt.Printf("invite picker: players lookup error for %v: %v\n", missing, err)
+			players = nil
 		}
 		playerMap := make(map[string]steamapi.Player, len(players))
 		for _, player := range players {
