@@ -27,6 +27,8 @@ type memStore struct {
 	games     map[int]*db.StoredGame
 	storeErr  error
 	dataCalls [][]db.GameData
+	// Read counters: sync-state, shared-library and missing-data lookups.
+	syncStateCalls, sharedCalls, missingCalls int
 }
 
 type memUser struct {
@@ -62,6 +64,7 @@ func (s *memStore) addUser(steamID, state string, library ...db.StoredGame) {
 func (s *memStore) GameSyncStates(_ context.Context, ids []string) (map[string]db.GameSyncState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.syncStateCalls++
 	states := map[string]db.GameSyncState{}
 	for _, id := range ids {
 		if u, ok := s.users[id]; ok {
@@ -74,6 +77,7 @@ func (s *memStore) GameSyncStates(_ context.Context, ids []string) (map[string]d
 func (s *memStore) SharedStoredGames(_ context.Context, caller string, others []string) ([]db.StoredGame, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sharedCalls++
 	u, ok := s.users[caller]
 	if !ok {
 		return nil, nil
@@ -97,6 +101,7 @@ func (s *memStore) SharedStoredGames(_ context.Context, caller string, others []
 func (s *memStore) GamesMissingData(_ context.Context, appIDs []int) ([]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.missingCalls++
 	var missing []int
 	for _, id := range appIDs {
 		if g, ok := s.games[id]; ok && !g.DataFetched {
@@ -361,26 +366,81 @@ func TestBuildSharedGamesMessagesNameMembers(t *testing.T) {
 	}
 }
 
+// countingFailingSteam returns a steamStub whose every call fails, and counts
+// the player-count and game-details calls made through it.
+func countingFailingSteam(countCalls, detailCalls *int) steamStub {
+	var mu sync.Mutex
+	return steamStub{
+		count: func(context.Context, string) (int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			*countCalls++
+			return 0, errors.New("Steam unavailable")
+		},
+		gamesDetails: func(context.Context, []int) ([]steamapi.GameDetail, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			*detailCalls++
+			return nil, errors.New("Steam unavailable")
+		},
+	}
+}
+
+// assertNoSoloLookup runs BuildSharedGames for a one-member roster and asserts
+// it reads no sync state or stored games and calls Steam not at all.
+func assertNoSoloLookup(t *testing.T, store *memStore, member db.PartyMember) {
+	t.Helper()
+	var countCalls, detailCalls int
+	steam := countingFailingSteam(&countCalls, &detailCalls)
+	games, messages, err := BuildSharedGames(context.Background(), steam, store, []db.PartyMember{member})
+	if err != nil || len(games) != 0 || len(messages) != 0 {
+		t.Fatalf("solo roster must yield nothing: games=%v messages=%v err=%v", games, messages, err)
+	}
+	if store.syncStateCalls != 0 || store.sharedCalls != 0 || store.missingCalls != 0 || len(store.dataCalls) != 0 {
+		t.Fatalf("solo roster read the store: syncStates=%d shared=%d missing=%d stores=%d", store.syncStateCalls, store.sharedCalls, store.missingCalls, len(store.dataCalls))
+	}
+	if countCalls != 0 || detailCalls != 0 {
+		t.Fatalf("solo roster called Steam: playerCounts=%d gameDetails=%d", countCalls, detailCalls)
+	}
+}
+
+// CLM-1: a one-member roster short-circuits before any lookup, whatever the
+// leader's sync state.
 func TestBuildSharedGamesEmptyAndSoloRoster(t *testing.T) {
 	if games, messages, err := BuildSharedGames(context.Background(), steamStub{}, newMemStore(), nil); err != nil || len(games) != 0 || len(messages) != 0 {
 		t.Fatalf("empty roster: %v %v %v", games, messages, err)
 	}
-	store := newMemStore()
-	store.addUser("solo", db.GameSyncSynced, stored(99, "Solo", false))
-	if games, messages, err := BuildSharedGames(context.Background(), steamStub{}, store, []db.PartyMember{{SteamID64: "solo"}}); err != nil || len(games) != 0 || len(messages) != 0 {
-		t.Fatalf("single-player only: %v %v %v", games, messages, err)
-	}
+	t.Run("never-synced leader", func(t *testing.T) {
+		store := newMemStore()
+		store.addUser("solo", db.GameSyncNeverSynced)
+		assertNoSoloLookup(t, store, db.PartyMember{SteamID64: "solo", Name: "Solo Leader"})
+	})
+	t.Run("leader with game missing data", func(t *testing.T) {
+		store := newMemStore()
+		store.addUser("solo", db.GameSyncSynced, db.StoredGame{AppID: 77, Name: "Unfetched"})
+		assertNoSoloLookup(t, store, db.PartyMember{SteamID64: "solo", Name: "Solo Leader"})
+	})
 }
 
+// CLM-1: a synced solo leader with a stored multiplayer game makes no
+// player-count call, so a failing count transport cannot surface an error.
 func TestBuildSharedGamesCountErrorReturned(t *testing.T) {
-	failure := errors.New("Steam unavailable")
-	store := newMemStore()
-	store.addUser("solo", db.GameSyncSynced, stored(10, "Ten", true))
-	steam := steamStub{count: func(context.Context, string) (int, error) { return 0, failure }}
-	games, messages, err := BuildSharedGames(context.Background(), steam, store, []db.PartyMember{{SteamID64: "solo"}})
-	if !errors.Is(err, failure) || len(games) != 0 || len(messages) != 0 {
-		t.Fatalf("partial or swallowed failure: %v %v %v", games, messages, err)
-	}
+	t.Run("solo leader with stored multiplayer game", func(t *testing.T) {
+		store := newMemStore()
+		store.addUser("solo", db.GameSyncSynced, stored(10, "Ten", true))
+		assertNoSoloLookup(t, store, db.PartyMember{SteamID64: "solo", Name: "Solo Leader"})
+	})
+	t.Run("two members surface the count failure", func(t *testing.T) {
+		store := newMemStore()
+		store.addUser("leader", db.GameSyncSynced, stored(10, "Ten", true))
+		store.addUser("member", db.GameSyncSynced, stored(10, "Ten", true))
+		var countCalls, detailCalls int
+		steam := countingFailingSteam(&countCalls, &detailCalls)
+		games, messages, err := BuildSharedGames(context.Background(), steam, store, []db.PartyMember{{SteamID64: "leader"}, {SteamID64: "member"}})
+		if err == nil || len(games) != 0 || len(messages) != 0 || countCalls != 1 {
+			t.Fatalf("partial or swallowed failure: games=%v messages=%v err=%v counts=%d", games, messages, err, countCalls)
+		}
+	})
 }
 
 // FetchMissingGameData runs bounded concurrent batches of at most ten ids.

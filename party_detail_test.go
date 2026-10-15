@@ -142,6 +142,10 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 			if !strings.Contains(body, `aria-label="Party members"`) || !strings.Contains(body, "Private Alyx") {
 				t.Fatalf("missing roster: %s", body)
 			}
+			// CLM-6: only a party of one shows the invite note.
+			if strings.Contains(body, soloPartyNote) != tc.solo {
+				t.Errorf("solo note visibility must match solo=%v: %s", tc.solo, body)
+			}
 			for _, section := range []string{`aria-label="Invite friends"`, `id="step-down-control"`} {
 				if strings.Contains(body, section) != tc.leader {
 					t.Errorf("incorrect visibility for %s: %s", section, body)
@@ -174,6 +178,107 @@ func TestPartyDetailLeaderControls(t *testing.T) {
 }
 
 const sharedGamesUnavailableMessage = "We could not load shared games right now. Please try again in a moment."
+
+const soloPartyNote = "Invite someone to your party to see the games you have in common."
+
+// sharedGamesSection returns the rendered "Shared games" section, or "" when
+// the page has none.
+func sharedGamesSection(body string) string {
+	start := strings.Index(body, `<section aria-label="Shared games"`)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(body[start:], "</section>")
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end]
+}
+
+// TestPartyDetailSoloSharedGames proves CLM-5/CLM-6: a party of one never asks
+// Steam for player counts, so a failing count transport cannot put the generic
+// failure on its page; it sees a neutral invite note instead. The two-member
+// contrast uses the same failing transport and a shared multiplayer game and
+// must show the generic message without the note.
+func TestPartyDetailSoloSharedGames(t *testing.T) {
+	const friendID = "76561198000000007"
+	for _, tc := range []struct {
+		name string
+		solo bool
+	}{
+		{name: "solo leader", solo: true},
+		{name: "two members", solo: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("STEAM_API_KEY", "detail-test-key")
+			countCalls, friendCalls := 0, 0
+			old := http.DefaultTransport
+			http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var body string
+				switch {
+				case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/"):
+					countCalls++
+					return nil, errors.New("private Steam failure details")
+				case strings.Contains(r.URL.Path, "/GetFriendList/"):
+					friendCalls++
+					body = `{"friendslist":{"friends":[{"steamid":"` + friendID + `","relationship":"friend","friend_since":1}]}}`
+				case strings.Contains(r.URL.Path, "/GetPlayerSummaries/"):
+					body = `{"response":{"players":[{"steamid":"` + friendID + `","personaname":"Live friend"}]}}`
+				default:
+					t.Errorf("unexpected Steam endpoint: %s", r.URL.Path)
+					return nil, errors.New("unexpected Steam endpoint")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = old })
+			store := &partyDetailStore{
+				leaveStore: leaveStore{found: true, candidates: []db.InviteCandidate{{UserID: 89, Name: "Eligible friend"}}},
+				member:     true, leader: true, solo: tc.solo,
+			}
+			// Every member is synced and shares a stored multiplayer game.
+			store.syncedGames = []db.StoredGame{{AppID: 10, Name: "Stored", DataFetched: true, HasData: true, Multiplayer: true}}
+			app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+			w := httptest.NewRecorder()
+			captureStdout(t, func() {
+				app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID, "", true))
+			})
+			body := w.Body.String()
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, body)
+			}
+			if friendCalls != 1 {
+				t.Fatalf("leader friends lookup must still run: friends requests=%d", friendCalls)
+			}
+			section := sharedGamesSection(body)
+			if section == "" {
+				t.Fatalf("missing Shared games section: %s", body)
+			}
+			if !tc.solo {
+				if countCalls == 0 || !strings.Contains(body, sharedGamesUnavailableMessage) || strings.Contains(body, soloPartyNote) {
+					t.Fatalf("two-member contrast must fail visibly without the note: counts=%d body=%s", countCalls, body)
+				}
+				return
+			}
+			if countCalls != 0 {
+				t.Fatalf("solo party requested player counts %d times", countCalls)
+			}
+			if strings.Contains(body, sharedGamesUnavailableMessage) {
+				t.Fatalf("solo party shows the generic failure: %s", body)
+			}
+			if !strings.Contains(section, soloPartyNote) {
+				t.Fatalf("solo party lacks the invite note: %s", section)
+			}
+			if strings.Contains(section, `role="alert"`) {
+				t.Fatalf("invite note rendered inside error-alert markup: %s", section)
+			}
+			for _, forbidden := range []string{"No games in common", "Shared games cannot be computed."} {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("solo party shows %q: %s", forbidden, body)
+				}
+			}
+		})
+	}
+}
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns what
 // was written, so a server-side diagnostic can be asserted without leaking

@@ -131,9 +131,10 @@ func uniqueMembers(caller string, others []string) []string {
 // the database-loaded roster, without syncing any member, and fetches a live
 // player count for each shared game. A member who is private or not yet synced
 // becomes a named message; store and player-count failures are returned to the
-// caller without partial counts.
+// caller without partial counts. A roster of fewer than two members has nothing
+// to share, so it returns nothing before any store read or Steam call.
 func BuildSharedGames(ctx context.Context, steam PartyGamesService, store SharedGamesStore, members []db.PartyMember) ([]component.SharedGameCount, []string, error) {
-	if len(members) == 0 {
+	if len(members) < 2 {
 		return nil, nil, nil
 	}
 	ids := make([]string, len(members))
