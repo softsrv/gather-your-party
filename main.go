@@ -781,6 +781,20 @@ func (app *application) handleStepDown(ctx *middleware.CustomContext, w http.Res
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// isSteamID64 reports whether s is a 17-digit decimal SteamID64, the form
+// Steam friend lists and the invite picker carry.
+func isSteamID64(s string) bool {
+	if len(s) != 17 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	partyID, actingUserID, ok := app.leaveIdentity(ctx, w, r)
 	if !ok {
@@ -790,12 +804,82 @@ func (app *application) handleSendInvite(ctx *middleware.CustomContext, w http.R
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	targetID, err := strconv.ParseInt(r.PostForm.Get("target"), 10, 64)
-	if err != nil {
+	// The target is the friend's SteamID64; the users row is resolved (or
+	// created for a friend who never signed in) only after the checks below.
+	targetSteamID := r.PostForm.Get("target")
+	if !isSteamID64(targetSteamID) {
 		http.Error(w, "invalid target", http.StatusBadRequest)
 		return
 	}
+	partyPage := "/parties/" + partyID
+	refuse := func() { http.Redirect(w, r, partyPage, http.StatusSeeOther) }
+
+	members, err := app.store.PartyMembers(r.Context(), partyID)
+	if err != nil {
+		http.Error(w, "unable to send invite", http.StatusInternalServerError)
+		return
+	}
+	isLeader := false
+	for _, member := range members {
+		if member.UserID == actingUserID && member.IsLeader {
+			isLeader = true
+		}
+		if member.SteamID64 == targetSteamID {
+			// Already a member: nothing to write, not even the users row.
+			refuse()
+			return
+		}
+	}
+	if !isLeader {
+		refuse()
+		return
+	}
+
+	leaderSteamID, _ := ctx.Value(middleware.SteamID{}).(string)
+	steamCtx, cancelSteam := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancelSteam()
+	service := app.steamService()()
+	friends, err := service.Friends(steamCtx, leaderSteamID)
+	if err != nil {
+		fmt.Printf("send invite: friends: %s\n", err)
+		http.Error(w, "unable to verify Steam friends", http.StatusBadGateway)
+		return
+	}
+	isFriend := false
+	for _, friend := range friends {
+		if friend.SteamID == targetSteamID {
+			isFriend = true
+			break
+		}
+	}
+	if !isFriend {
+		refuse()
+		return
+	}
+	profile := steamapi.Player{SteamID: targetSteamID}
+	players, err := service.Players(steamCtx, []string{targetSteamID})
+	if err != nil {
+		fmt.Printf("send invite: players: %s\n", err)
+		http.Error(w, "unable to load Steam profile", http.StatusBadGateway)
+		return
+	}
+	for _, player := range players {
+		if player.SteamID == targetSteamID {
+			profile = player
+		}
+	}
+	// UpsertFriend is conflict-safe on steam_id_64 and never changes
+	// ever_logged_in on an existing row, so a signed-in friend is not demoted.
+	targetID, err := app.store.UpsertFriend(r.Context(), targetSteamID, profile)
+	if err != nil {
+		http.Error(w, "unable to send invite", http.StatusInternalServerError)
+		return
+	}
 	if err := app.store.SendInvite(r.Context(), partyID, actingUserID, targetID); err != nil {
+		if errors.Is(err, db.ErrNotLeader) || errors.Is(err, db.ErrAlreadyMember) || errors.Is(err, db.ErrInvitePending) {
+			refuse()
+			return
+		}
 		http.Error(w, "unable to send invite", http.StatusInternalServerError)
 		return
 	}
