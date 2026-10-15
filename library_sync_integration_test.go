@@ -347,10 +347,31 @@ func TestLibrarySyncTwoInstancesOneSync(t *testing.T) {
 	}
 }
 
-// CLM-7: a request arriving while another sync holds the lock waits for it,
+// CLM-7 / CLM-3: a request arriving while another sync holds the lock waits for it,
 // makes no Steam call, and returns that sync's success.
+//
+// In addition, CLM-3 asserts that:
+//   - A signed-in page with sync due (GET /) contains user-menu carrying ml-auto, with ml-auto appearing exactly once.
+//   - The GET /library/sync response on both success and failure consists of id="library-sync"
+//     and contains none of user-menu, hx-swap-oob, or ml-auto.
 func TestLibrarySyncWaitsOnRunningSync(t *testing.T) {
 	f := lsNewFixture(t)
+
+	// Companion assertion for CLM-3: signed-in page with sync due (GET /).
+	// User-menu element carries ml-auto, and ml-auto appears exactly once in the page.
+	var homeRecorder *httptest.ResponseRecorder
+	captureStdout(t, func() { homeRecorder = f.get("/") })
+	if homeRecorder.Code != http.StatusOK {
+		t.Fatalf("GET / status=%d, want 200", homeRecorder.Code)
+	}
+	homeBody := homeRecorder.Body.String()
+	if !strings.Contains(homeBody, `class="user-menu dropdown dropdown-end ml-auto"`) {
+		t.Fatalf("signed-in due page missing user-menu with ml-auto: %s", homeBody)
+	}
+	if count := strings.Count(homeBody, "ml-auto"); count != 1 {
+		t.Fatalf("signed-in due page ml-auto count=%d, want exactly 1: %s", count, homeBody)
+	}
+
 	f.steam.games = lsLibrary
 	locked := make(chan struct{})
 	var releasedAt atomic.Int64
@@ -381,6 +402,29 @@ func TestLibrarySyncWaitsOnRunningSync(t *testing.T) {
 	if strings.Contains(body, "Library sync failed") || strings.Contains(body, "loading-spinner") || !strings.Contains(body, `id="library-sync"`) {
 		t.Fatalf("body=%s, want the success fragment", body)
 	}
+	for _, forbidden := range []string{"user-menu", "hx-swap-oob", "ml-auto"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("success body unexpectedly contains %q: %s", forbidden, body)
+		}
+	}
+
+	// CLM-3 failure path check: drive a sync failure and verify body contains
+	// id="library-sync" and none of user-menu, hx-swap-oob, or ml-auto.
+	t.Run("failure_response_format", func(t *testing.T) {
+		fFail := lsNewFixture(t)
+		fFail.steam.games = func(context.Context, string) ([]steamapi.Game, error) {
+			return nil, errors.New("steam owned games 503")
+		}
+		failBody, _ := fFail.sync(t)
+		if !strings.Contains(failBody, `id="library-sync"`) || !strings.Contains(failBody, "Library sync failed") {
+			t.Fatalf("failBody=%s, want failure fragment with id=\"library-sync\"", failBody)
+		}
+		for _, forbidden := range []string{"user-menu", "hx-swap-oob", "ml-auto"} {
+			if strings.Contains(failBody, forbidden) {
+				t.Fatalf("failure body unexpectedly contains %q: %s", forbidden, failBody)
+			}
+		}
+	})
 }
 
 // CLM-8: a lock left by a connection that died is freed with it.
