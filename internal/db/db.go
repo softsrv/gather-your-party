@@ -434,6 +434,12 @@ type InviteCandidate struct {
 	AvatarURL string
 }
 
+var (
+	ErrNotLeader     = errors.New("send invite: acting user is not the party's leader")
+	ErrAlreadyMember = errors.New("send invite: target is already a member of the party")
+	ErrInvitePending = errors.New("send invite: target already has a pending invite")
+)
+
 // SendInvite records an invitation only for the current leader. A user can be
 // invited again after rejecting. Locking the party serializes this with replies
 // and leadership changes.
@@ -451,7 +457,23 @@ func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUser
 		return fmt.Errorf("send invite: lookup party: %w", err)
 	}
 	if currentLeader != actingLeaderUserID {
-		return errors.New("send invite: acting user is not the party's leader")
+		return ErrNotLeader
+	}
+
+	var isMember bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, partyID, targetUserID).Scan(&isMember); err != nil {
+		return fmt.Errorf("send invite: check membership: %w", err)
+	}
+	if isMember {
+		return ErrAlreadyMember
+	}
+
+	var hasPending bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM invites WHERE party_id = $1 AND user_id = $2 AND status = 'pending')`, partyID, targetUserID).Scan(&hasPending); err != nil {
+		return fmt.Errorf("send invite: check pending: %w", err)
+	}
+	if hasPending {
+		return ErrInvitePending
 	}
 
 	if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'pending')`, partyID, targetUserID, actingLeaderUserID); err != nil {

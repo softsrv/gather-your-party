@@ -42,6 +42,7 @@ type appConfig struct {
 
 type sessionStore interface {
 	UpsertUser(context.Context, string, steamapi.Player) (int64, error)
+	UpsertFriend(context.Context, string, steamapi.Player) (int64, error)
 	CreateSession(context.Context, int64) (string, error)
 	ResolveSession(context.Context, string) (string, bool, error)
 	DeleteSession(context.Context, string) error
