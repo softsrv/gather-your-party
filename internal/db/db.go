@@ -429,13 +429,22 @@ func (s *Store) StepDown(ctx context.Context, partyID string, actingLeaderUserID
 // InviteCandidate is a known user eligible to appear in a party's invite picker.
 type InviteCandidate struct {
 	UserID    int64
+	SteamID   string
 	Name      string
 	AvatarURL string
 }
 
-// SendInvite records an invitation only for the current leader. A user can be
-// invited again after rejecting. Locking the party serializes this with replies
-// and leadership changes.
+var (
+	ErrNotLeader     = errors.New("send invite: acting user is not the party's leader")
+	ErrAlreadyMember = errors.New("send invite: target is already a member of the party")
+	ErrInvitePending = errors.New("send invite: target already has a pending invite")
+)
+
+// SendInvite records an invitation only for the current leader. A signed-in
+// target gets a pending invite they accept or reject themselves, and can be
+// invited again after rejecting. A target who has never signed in is joined at
+// once (accepted invite plus membership). Locking the party serializes this
+// with replies and leadership changes.
 func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUserID int64, targetUserID int64) error {
 	q, done := s.querier(ctx)
 	defer done()
@@ -450,7 +459,43 @@ func (s *Store) SendInvite(ctx context.Context, partyID string, actingLeaderUser
 		return fmt.Errorf("send invite: lookup party: %w", err)
 	}
 	if currentLeader != actingLeaderUserID {
-		return errors.New("send invite: acting user is not the party's leader")
+		return ErrNotLeader
+	}
+
+	var isMember bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE party_id = $1 AND user_id = $2)`, partyID, targetUserID).Scan(&isMember); err != nil {
+		return fmt.Errorf("send invite: check membership: %w", err)
+	}
+	if isMember {
+		return ErrAlreadyMember
+	}
+
+	var hasPending bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM invites WHERE party_id = $1 AND user_id = $2 AND status = 'pending')`, partyID, targetUserID).Scan(&hasPending); err != nil {
+		return fmt.Errorf("send invite: check pending: %w", err)
+	}
+	if hasPending {
+		return ErrInvitePending
+	}
+
+	var everLoggedIn bool
+	if err := tx.QueryRow(ctx, `SELECT ever_logged_in FROM users WHERE id = $1`, targetUserID).Scan(&everLoggedIn); err != nil {
+		return fmt.Errorf("send invite: lookup target: %w", err)
+	}
+	if !everLoggedIn {
+		// A friend who has never signed in cannot accept, so the leader's add
+		// joins them directly: an accepted invite and the membership, written
+		// under the same party lock as AcceptInvite.
+		if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'accepted')`, partyID, targetUserID, actingLeaderUserID); err != nil {
+			return fmt.Errorf("send invite: insert accepted invite: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, partyID, targetUserID); err != nil {
+			return fmt.Errorf("send invite: create membership: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit send invite: %w", err)
+		}
+		return nil
 	}
 
 	if _, err := tx.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id, status) VALUES ($1, $2, $3, 'pending')`, partyID, targetUserID, actingLeaderUserID); err != nil {
@@ -535,16 +580,14 @@ func (s *Store) RejectInvite(ctx context.Context, partyID string, actingUserID i
 }
 
 // InviteCandidates intersects live friend identities with registered users,
-// excluding self, current members, pending invitees, and users who have never
-// signed in (friends recorded by another user's sync) in the same SQL query.
+// excluding self, current members, and pending invitees in the same SQL query.
 func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLeaderUserID int64, friendSteamID64s []string) ([]InviteCandidate, error) {
 	q, done := s.querier(ctx)
 	defer done()
 	rows, err := q.Query(ctx, `
-		SELECT u.id, u.persona_name, u.avatar_medium FROM users u
+		SELECT u.id, u.steam_id_64, u.persona_name, u.avatar_medium FROM users u
 		WHERE u.steam_id_64 = ANY($3::text[])
 			AND u.id <> $2
-			AND u.ever_logged_in
 			AND EXISTS (SELECT 1 FROM parties p WHERE p.id = $1 AND p.leader_id = $2)
 			AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.party_id = $1 AND m.user_id = u.id)
 			AND NOT EXISTS (SELECT 1 FROM invites i WHERE i.party_id = $1 AND i.user_id = u.id AND i.status = 'pending')
@@ -556,7 +599,7 @@ func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLead
 	candidates := make([]InviteCandidate, 0)
 	for rows.Next() {
 		var candidate InviteCandidate
-		if err := rows.Scan(&candidate.UserID, &candidate.Name, &candidate.AvatarURL); err != nil {
+		if err := rows.Scan(&candidate.UserID, &candidate.SteamID, &candidate.Name, &candidate.AvatarURL); err != nil {
 			return nil, fmt.Errorf("invite candidates: scan: %w", err)
 		}
 		candidates = append(candidates, candidate)
@@ -565,6 +608,40 @@ func (s *Store) InviteCandidates(ctx context.Context, partyID string, actingLead
 		return nil, fmt.Errorf("invite candidates: rows: %w", err)
 	}
 	return candidates, nil
+}
+
+// InviteExclusions returns the Steam IDs among the given friend list that are
+// excluded from invitation to the party (current members or pending invitees).
+func (s *Store) InviteExclusions(ctx context.Context, partyID string, friendSteamID64s []string) ([]string, error) {
+	if len(friendSteamID64s) == 0 {
+		return nil, nil
+	}
+	q, done := s.querier(ctx)
+	defer done()
+	rows, err := q.Query(ctx, `
+		SELECT u.steam_id_64 FROM users u
+		WHERE u.steam_id_64 = ANY($2::text[])
+			AND (
+				EXISTS (SELECT 1 FROM memberships m WHERE m.party_id = $1 AND m.user_id = u.id)
+				OR EXISTS (SELECT 1 FROM invites i WHERE i.party_id = $1 AND i.user_id = u.id AND i.status = 'pending')
+			)
+		ORDER BY u.id`, partyID, friendSteamID64s)
+	if err != nil {
+		return nil, fmt.Errorf("invite exclusions: %w", err)
+	}
+	defer rows.Close()
+	var excluded []string
+	for rows.Next() {
+		var steamID string
+		if err := rows.Scan(&steamID); err != nil {
+			return nil, fmt.Errorf("invite exclusions: scan: %w", err)
+		}
+		excluded = append(excluded, steamID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("invite exclusions: rows: %w", err)
+	}
+	return excluded, nil
 }
 
 func newSessionToken() (string, error) {

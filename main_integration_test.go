@@ -186,7 +186,12 @@ func TestInviteRoutesRealStore(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id) VALUES ($1,$2)`, party, member); err != nil {
 		t.Fatal(err)
 	}
-	app := application{store: store, config: appConfig{SessionSecret: "invite-integration-secret"}}
+	// The target is the leader's live Steam friend; the send handler checks it.
+	friends := &endToEndFakeSteam{
+		friends: []steamapi.Friend{{SteamID: "76561198000000302", Relationship: "friend"}},
+		players: map[string]steamapi.Player{"76561198000000302": {SteamID: "76561198000000302", PersonaName: "Invite user"}},
+	}
+	app := application{store: store, config: appConfig{SessionSecret: "invite-integration-secret"}, steam: func() view.SteamService { return friends }}
 	router := app.routes()
 	cookieFor := func(userID int64) *http.Cookie {
 		t.Helper()
@@ -213,9 +218,10 @@ func TestInviteRoutesRealStore(t *testing.T) {
 			t.Fatalf("%s status=%d want=%d body=%s", action, w.Code, want, w.Body.String())
 		}
 	}
-	sendBody := fmt.Sprintf("target=%d&user_id=%d&steamID=forged", target, leader)
+	sendBody := fmt.Sprintf("target=76561198000000302&user_id=%d&steamID=forged", leader)
 	request("send", nil, sendBody, 401)
-	request("send", memberCookie, sendBody, 500)
+	// A non-leader is redirected back to the party page, never a 5xx (CLM-4).
+	request("send", memberCookie, sendBody, 303)
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM invites WHERE party_id=$1`, party).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("unauthorized invites=%d err=%v", count, err)

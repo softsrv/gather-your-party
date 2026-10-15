@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"gather-your-party/internal/db"
+	"gather-your-party/internal/view"
 
 	"github.com/softsrv/steamapi/steamapi"
 )
@@ -20,50 +21,56 @@ const testPartyID = "61daf402-9c06-4c3b-923f-5f7dfd4369c7"
 
 type leaveStore struct {
 	fakeSessionStore
-	invalidSession     bool
-	createCalls        int
-	createUser         int64
-	createName         string
-	createErr          error
-	parties            []db.UserParty
-	invites            []db.UserPendingInvite
-	partiesCalls       int
-	invitesCalls       int
-	partiesUser        int64
-	invitesUser        int64
-	partiesErr         error
-	invitesErr         error
-	identity           string
-	found              bool
-	resolveErr         error
-	leaveErr           error
-	partyID            string
-	actingID           int64
-	leaveCalls         int
-	stepDownErr        error
-	stepDownCall       int
-	stepDownParty      string
-	stepDownActing     int64
-	stepDownTarget     int64
-	sendInviteCall     int
-	sendInviteParty    string
-	sendInviteActing   int64
-	sendInviteTarget   int64
-	sendInviteErr      error
-	acceptInviteCall   int
-	acceptInviteParty  string
-	acceptInviteActing int64
-	acceptInviteErr    error
-	rejectInviteCall   int
-	rejectInviteParty  string
-	rejectInviteActing int64
-	rejectInviteErr    error
-	candidateCall      int
-	candidateParty     string
-	candidateActing    int64
-	candidateFriends   []string
-	candidates         []db.InviteCandidate
-	candidateErr       error
+	invalidSession      bool
+	createCalls         int
+	createUser          int64
+	createName          string
+	createErr           error
+	parties             []db.UserParty
+	invites             []db.UserPendingInvite
+	partiesCalls        int
+	invitesCalls        int
+	partiesUser         int64
+	invitesUser         int64
+	partiesErr          error
+	invitesErr          error
+	identity            string
+	found               bool
+	resolveErr          error
+	leaveErr            error
+	partyID             string
+	actingID            int64
+	leaveCalls          int
+	stepDownErr         error
+	stepDownCall        int
+	stepDownParty       string
+	stepDownActing      int64
+	stepDownTarget      int64
+	sendInviteCall      int
+	sendInviteParty     string
+	sendInviteActing    int64
+	sendInviteTarget    int64
+	sendInviteErr       error
+	acceptInviteCall    int
+	acceptInviteParty   string
+	acceptInviteActing  int64
+	acceptInviteErr     error
+	rejectInviteCall    int
+	rejectInviteParty   string
+	rejectInviteActing  int64
+	rejectInviteErr     error
+	candidateCall       int
+	candidateParty      string
+	candidateActing     int64
+	candidateFriends    []string
+	candidates          []db.InviteCandidate
+	candidateErr        error
+	notLeader           bool
+	members             []db.PartyMember
+	upsertFriendCall    int
+	upsertFriendSteamID string
+	// users maps a non-session SteamID64 to an existing users.id.
+	users map[string]int64
 }
 
 func (s *leaveStore) ResolveSession(context.Context, string) (string, bool, error) {
@@ -96,6 +103,12 @@ func (s *leaveStore) UserProfile(_ context.Context, steamID string) (steamapi.Pl
 }
 
 func (s *leaveStore) ResolveUserID(_ context.Context, steamID string) (int64, bool, error) {
+	if steamID != testSteamID {
+		// A target lookup by the send-invite handler: only rows listed in
+		// users exist; it does not overwrite the session identity record.
+		id, ok := s.users[steamID]
+		return id, ok, nil
+	}
 	s.identity = steamID
 	return 42, s.found, s.resolveErr
 }
@@ -116,6 +129,63 @@ func (s *leaveStore) SendInvite(_ context.Context, partyID string, actingID int6
 	s.sendInviteCall++
 	s.sendInviteParty, s.sendInviteActing, s.sendInviteTarget = partyID, actingID, targetID
 	return s.sendInviteErr
+}
+
+// PartyMembers reports the acting user (42) as the party's leader unless
+// notLeader is set; members appends extra rows.
+func (s *leaveStore) PartyMembers(context.Context, string) ([]db.PartyMember, error) {
+	members := []db.PartyMember{{UserID: 42, SteamID64: testSteamID, Name: "Leader", IsLeader: !s.notLeader}}
+	return append(members, s.members...), nil
+}
+
+// UpsertFriend resolves every friend to users.id 7.
+func (s *leaveStore) UpsertFriend(_ context.Context, steamID string, _ steamapi.Player) (int64, error) {
+	s.upsertFriendCall++
+	s.upsertFriendSteamID = steamID
+	return 7, nil
+}
+
+// inviteTestFriendID is the leader's Steam friend in the router tests.
+const inviteTestFriendID = "76561198000000007"
+
+// inviteSteam is the Steam surface the send-invite handler checks friendship
+// against; only Friends and Players are expected.
+type inviteSteam struct{ friends []string }
+
+func (f inviteSteam) Friends(context.Context, string) ([]steamapi.Friend, error) {
+	friends := make([]steamapi.Friend, 0, len(f.friends))
+	for _, id := range f.friends {
+		friends = append(friends, steamapi.Friend{SteamID: id, Relationship: "friend"})
+	}
+	return friends, nil
+}
+
+func (f inviteSteam) Players(_ context.Context, ids []string) ([]steamapi.Player, error) {
+	players := make([]steamapi.Player, 0, len(ids))
+	for _, id := range ids {
+		players = append(players, steamapi.Player{SteamID: id, PersonaName: "Friend " + id})
+	}
+	return players, nil
+}
+
+func (inviteSteam) Games(context.Context, string, bool, bool) ([]steamapi.Game, error) {
+	return nil, errors.New("unexpected Games call")
+}
+
+func (inviteSteam) GamesDetails(context.Context, []int) ([]steamapi.GameDetail, error) {
+	return nil, errors.New("unexpected GamesDetails call")
+}
+
+func (inviteSteam) GetNumberOfCurrentPlayers(context.Context, string) (int, error) {
+	return 0, errors.New("unexpected GetNumberOfCurrentPlayers call")
+}
+
+func inviteTestApp(store sessionStore) application {
+	return application{
+		store:  store,
+		config: appConfig{SessionSecret: "leave-test-secret"},
+		steam:  func() view.SteamService { return inviteSteam{friends: []string{inviteTestFriendID}} },
+	}
 }
 
 func (s *leaveStore) AcceptInvite(_ context.Context, partyID string, actingID int64) error {
@@ -318,11 +388,11 @@ func TestRejectInviteRoutes(t *testing.T) { testInviteRoute(t, "reject") }
 func testInviteRoute(t *testing.T, action string) {
 	t.Helper()
 	store := &leaveStore{found: true}
-	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+	app := inviteTestApp(store)
 	path := "/parties/" + testPartyID + "/invites/" + action
 	for _, hx := range []bool{true, false} {
 		w := httptest.NewRecorder()
-		r := leaveRequest("POST", path, "target=7&user_id=999&steamID=forged", true)
+		r := leaveRequest("POST", path, "target="+inviteTestFriendID+"&user_id=999&steamID=forged", true)
 		if hx {
 			r.Header.Set("HX-Request", "true")
 		}
@@ -410,14 +480,38 @@ func TestSendInviteRejectsInvalidTarget(t *testing.T) {
 	}
 }
 
+// A friend whose users row already exists is refused with a redirect, and
+// nothing is written, when they are already a member or already invited; an
+// existing row is never rewritten through UpsertFriend.
+func TestSendInviteExistingTargetRefusedWithoutWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		members []db.PartyMember
+		invites []db.UserPendingInvite
+	}{
+		{name: "pending invitee", invites: []db.UserPendingInvite{{PartyID: testPartyID, Name: "Party"}}},
+		{name: "member", members: []db.PartyMember{{UserID: 9, SteamID64: "76561198000000099", Name: "Old row"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &leaveStore{found: true, members: tc.members, invites: tc.invites, users: map[string]int64{inviteTestFriendID: 9}}
+			app := inviteTestApp(store)
+			w := httptest.NewRecorder()
+			app.routes().ServeHTTP(w, leaveRequest("POST", "/parties/"+testPartyID+"/invites/send", "target="+inviteTestFriendID, true))
+			if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/parties/"+testPartyID || store.sendInviteCall != 0 || store.upsertFriendCall != 0 {
+				t.Fatalf("status=%d location=%q sendInvite=%d upsertFriend=%d", w.Code, w.Header().Get("Location"), store.sendInviteCall, store.upsertFriendCall)
+			}
+		})
+	}
+}
+
 func TestInviteStoreErrors(t *testing.T) {
 	for _, action := range []string{"send", "accept", "reject"} {
 		t.Run(action, func(t *testing.T) {
 			private := errors.New("private database details")
 			store := &leaveStore{found: true, sendInviteErr: private, acceptInviteErr: private, rejectInviteErr: private}
-			app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+			app := inviteTestApp(store)
 			w := httptest.NewRecorder()
-			app.routes().ServeHTTP(w, leaveRequest("POST", "/parties/"+testPartyID+"/invites/"+action, "target=7", true))
+			app.routes().ServeHTTP(w, leaveRequest("POST", "/parties/"+testPartyID+"/invites/"+action, "target="+inviteTestFriendID, true))
 			if w.Code != http.StatusInternalServerError || store.sendInviteCall+store.acceptInviteCall+store.rejectInviteCall != 1 || strings.Contains(w.Body.String(), "private") {
 				t.Fatalf("failed invite: %d %s", w.Code, w.Body.String())
 			}

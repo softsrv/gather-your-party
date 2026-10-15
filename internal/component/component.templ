@@ -338,8 +338,16 @@ templ StepDownControl(partyID string, candidates []StepDownCandidate) {
 
 type InviteCandidate struct {
 	UserID    int64
+	SteamID   string
 	Name      string
 	AvatarURL string
+}
+
+func candidateTarget(candidate InviteCandidate) string {
+	if candidate.SteamID != "" {
+		return candidate.SteamID
+	}
+	return strconv.FormatInt(candidate.UserID, 10)
 }
 
 templ InvitePicker(partyID string, candidates []InviteCandidate) {
@@ -349,15 +357,15 @@ templ InvitePicker(partyID string, candidates []InviteCandidate) {
 			Invite friends
 		</h2>
 		if len(candidates) == 0 {
-			<p class="mt-2 text-sm text-base-content/60">No friends are available to invite. Steam friends show up here once they've signed in to Gather Your Party.</p>
+			<p class="mt-2 text-sm text-base-content/60">No friends are available to invite.</p>
 		} else {
-			<p class="mb-4 mt-1 text-sm text-base-content/60">Steam friends who use Gather Your Party.</p>
+			<p class="mb-4 mt-1 text-sm text-base-content/60">Steam friends.</p>
 			<div class="grid gap-2">
 				for _, candidate := range candidates {
 					<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/invites/send") } hx-post={ "/parties/" + partyID + "/invites/send" } hx-swap="none" hx-on::after-request="if (event.detail.successful) this.classList.add('is-sent')" class="invite-row flex items-center gap-3">
 						@Avatar(candidate.AvatarURL, candidate.Name, "h-8 w-8 text-xs")
 						<span class="min-w-0 flex-1 truncate text-sm font-medium">{ candidate.Name }</span>
-						<button type="submit" name="target" value={ strconv.FormatInt(candidate.UserID, 10) } class="btn btn-secondary btn-xs" aria-label={ "Invite " + candidate.Name }>Invite</button>
+						<button type="submit" name="target" value={ candidateTarget(candidate) } class="btn btn-secondary btn-xs" aria-label={ "Invite " + candidate.Name }>Invite</button>
 					</form>
 				}
 			</div>

@@ -24,13 +24,22 @@ type inviteFriendsService interface {
 	Friends(context.Context, string) ([]steamapi.Friend, error)
 }
 
+type invitePlayersService interface {
+	Players(context.Context, []string) ([]steamapi.Player, error)
+}
+
 type inviteCandidateStore interface {
 	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
 }
 
+type inviteExclusionsStore interface {
+	InviteExclusions(context.Context, string, []string) ([]string, error)
+}
+
 // BuildInviteCandidates fetches the verified leader's live friends and builds
-// the picker model through the store's intersection and exclusions. Callers must
-// supply the SteamID and users.id resolved from the same verified session.
+// the picker model through the store's intersection and exclusions, merging live
+// friends lacking a users row (profile from Steam Players) into candidates.
+// Callers must supply the SteamID and users.id resolved from the same verified session.
 // This helper is ready for the parties view; it does not introduce a new page.
 func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, store inviteCandidateStore, partyID string, actingLeaderUserID int64, verifiedSteamID string) ([]component.InviteCandidate, error) {
 	friends, err := service.Friends(ctx, verifiedSteamID)
@@ -39,15 +48,89 @@ func BuildInviteCandidates(ctx context.Context, service inviteFriendsService, st
 	}
 	friendIDs := make([]string, 0, len(friends))
 	for _, friend := range friends {
+		// The leader is never their own candidate, whether or not they hold a
+		// membership row; match on Steam id so a users row is not required.
+		if friend.SteamID == verifiedSteamID {
+			continue
+		}
 		friendIDs = append(friendIDs, friend.SteamID)
 	}
 	known, err := store.InviteCandidates(ctx, partyID, actingLeaderUserID, friendIDs)
 	if err != nil {
 		return nil, fmt.Errorf("invite picker: candidates: %w", err)
 	}
+	var excluded map[string]struct{}
+	if exclStore, ok := store.(inviteExclusionsStore); ok {
+		exclList, err := exclStore.InviteExclusions(ctx, partyID, friendIDs)
+		if err != nil {
+			return nil, fmt.Errorf("invite picker: exclusions: %w", err)
+		}
+		excluded = make(map[string]struct{}, len(exclList))
+		for _, id := range exclList {
+			excluded[id] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(friendIDs))
 	candidates := make([]component.InviteCandidate, 0, len(known))
 	for _, candidate := range known {
-		candidates = append(candidates, component.InviteCandidate{UserID: candidate.UserID, Name: candidate.Name, AvatarURL: candidate.AvatarURL})
+		candidates = append(candidates, component.InviteCandidate{
+			UserID:    candidate.UserID,
+			SteamID:   candidate.SteamID,
+			Name:      candidate.Name,
+			AvatarURL: candidate.AvatarURL,
+		})
+		if candidate.SteamID != "" {
+			seen[candidate.SteamID] = struct{}{}
+		}
+	}
+	// Friends lacking a users row are presented from their Steam profile; a
+	// service that cannot look profiles up lists registered friends only.
+	playerService, canLookUpPlayers := service.(invitePlayersService)
+	if !canLookUpPlayers {
+		return candidates, nil
+	}
+	var missing []string
+	for _, friendID := range friendIDs {
+		if _, ok := seen[friendID]; ok {
+			continue
+		}
+		if excluded != nil {
+			if _, ok := excluded[friendID]; ok {
+				continue
+			}
+		}
+		missing = append(missing, friendID)
+	}
+	if len(missing) > 0 {
+		players, err := playerService.Players(ctx, missing)
+		if err != nil {
+			fmt.Printf("invite picker: players lookup error for %v: %v\n", missing, err)
+			players = nil
+		}
+		playerMap := make(map[string]steamapi.Player, len(players))
+		for _, player := range players {
+			playerMap[player.SteamID] = player
+		}
+		for _, friendID := range missing {
+			player, ok := playerMap[friendID]
+			name := friendID
+			var avatar string
+			if ok {
+				if player.PersonaName != "" {
+					name = player.PersonaName
+				}
+				avatar = player.AvatarMedium
+				if avatar == "" {
+					avatar = player.AvatarSmall
+				}
+			}
+			candidates = append(candidates, component.InviteCandidate{
+				UserID:    0,
+				SteamID:   friendID,
+				Name:      name,
+				AvatarURL: avatar,
+			})
+		}
 	}
 	return candidates, nil
 }
