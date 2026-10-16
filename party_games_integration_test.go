@@ -184,6 +184,10 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 				}
 				return
 			}
+			wantInputAttr := `data-items="#party-shared-games-grid li"`
+			if !strings.Contains(body, wantInputAttr) {
+				t.Errorf("expected search input with %q in body: %s", wantInputAttr, body)
+			}
 			items := regexp.MustCompile(`<li data-appid="([0-9]+)"[^>]*>(.*?)</li>`).FindAllStringSubmatch(body, -1)
 			if len(items) != 2 {
 				t.Fatalf("rendered games=%d want exactly 2: %s", len(items), body)
@@ -193,6 +197,10 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 				wantHeader := fmt.Sprintf(`src="https://cdn.cloudflare.steamstatic.com/steam/apps/%s/header.jpg"`, wantID)
 				if item[1] != wantID || !strings.Contains(item[2], games[i].Name) || !strings.Contains(item[2], wantHeader) {
 					t.Errorf("game/image pairing incorrect: %s", item[0])
+				}
+				wantDataName := fmt.Sprintf(`data-name="%s"`, strings.ToLower(games[i].Name))
+				if !strings.Contains(item[0], wantDataName) {
+					t.Errorf("expected %s in %s", wantDataName, item[0])
 				}
 			}
 			if strings.Contains(body, "players online now") {

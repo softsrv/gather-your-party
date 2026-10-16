@@ -550,9 +550,10 @@ templ SharedGamesWithCounts(games []SharedGameCount) {
 	if len(games) == 0 {
 		@EmptyState("gamepad", "No games in common", "This party has no multiplayer games in common.")
 	} else {
+		@SearchInput("Search games", "#party-shared-games-grid li")
 		<ul id="party-shared-games-grid" class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
 			for _, entry := range games {
-				<li data-appid={ strconv.Itoa(entry.Game.AppID) } class="overflow-hidden rounded-xl border border-white/5 bg-base-200/70">
+				<li data-appid={ strconv.Itoa(entry.Game.AppID) } data-name={ strings.ToLower(entry.Game.Name) } class="overflow-hidden rounded-xl border border-white/5 bg-base-200/70">
 					<img src={ gameHeaderURL(entry.Game.AppID) } alt="" class="w-full" loading="lazy"/>
 					<div class="p-2.5">
 						<p class="truncate text-sm font-medium" title={ entry.Game.Name }>{ entry.Game.Name }</p>
