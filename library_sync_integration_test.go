@@ -244,11 +244,110 @@ func TestLibrarySyncDueRule(t *testing.T) {
 	})
 }
 
-// CLM-5: a friends or library failure leaves the stamp unset and the user due;
-// a game details failure alone still succeeds.
+// lsFriendsSteam wraps the Steam double so the friends refresh can panic, hang
+// until its context is done, or fail one profile batch (a partial error).
+type lsFriendsSteam struct {
+	*loginSteam
+	friends func(ctx context.Context, steamID string) ([]steamapi.Friend, error)
+	players func(ctx context.Context, ids []string) ([]steamapi.Player, error)
+}
+
+func (s *lsFriendsSteam) Friends(ctx context.Context, steamID string) ([]steamapi.Friend, error) {
+	if s.friends != nil {
+		return s.friends(ctx, steamID)
+	}
+	return s.loginSteam.Friends(ctx, steamID)
+}
+
+func (s *lsFriendsSteam) Players(ctx context.Context, ids []string) ([]steamapi.Player, error) {
+	if s.players != nil {
+		return s.players(ctx, ids)
+	}
+	return s.loginSteam.Players(ctx, ids)
+}
+
+// useFriendsSteam routes the fixture's app through a wrapper of its double.
+func (f *lsFixture) useFriendsSteam(w *lsFriendsSteam) {
+	w.loginSteam = f.steam
+	f.app.steam = func() view.SteamService { return w }
+}
+
+// lsPartialFriends makes the friends list succeed and its profile batch fail,
+// so syncLoginFriends returns a joined partial error.
+func lsPartialFriends(f *lsFixture) {
+	f.steam.friends = []string{"76561198000000901"}
+	f.useFriendsSteam(&lsFriendsSteam{players: func(context.Context, []string) ([]steamapi.Player, error) {
+		return nil, errors.New("profiles unavailable")
+	}})
+}
+
+func lsPanicFriends(f *lsFixture) {
+	f.useFriendsSteam(&lsFriendsSteam{friends: func(context.Context, string) ([]steamapi.Friend, error) {
+		panic("friends exploded")
+	}})
+}
+
+func lsHangFriends(f *lsFixture) {
+	f.useFriendsSteam(&lsFriendsSteam{friends: func(ctx context.Context, _ string) ([]steamapi.Friend, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}})
+}
+
+func (f *lsFixture) userGames(t *testing.T) int {
+	t.Helper()
+	var games int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM user_games WHERE user_id = $1`, f.userID).Scan(&games); err != nil {
+		t.Fatal(err)
+	}
+	return games
+}
+
+// A failed friends refresh (error, partial error, panic, or a hang until its
+// context is done) never fails the library sync: the library is saved, the
+// stamp set, the stored error cleared and no banner shown.
 func TestLibrarySyncStampOnlyOnSuccess(t *testing.T) {
+	friendsCases := map[string]func(*lsFixture){
+		"friends":         func(f *lsFixture) { f.steam.friendsErr = errors.New("friends unavailable") },
+		"friends_partial": lsPartialFriends,
+		"friends_panic":   lsPanicFriends,
+		"friends_hang": func(f *lsFixture) {
+			lsHangFriends(f)
+			f.app.librarySyncTimeout = 2 * time.Second
+		},
+	}
+	for name, setup := range friendsCases {
+		t.Run(name, func(t *testing.T) {
+			f := lsNewFixture(t)
+			// A stored error from an earlier failure must be cleared.
+			if err := f.store.RecordSyncFailure(f.ctx, f.userID, "earlier failure"); err != nil {
+				t.Fatal(err)
+			}
+			f.steam.games = lsLibrary
+			setup(f)
+			if body, _ := f.sync(t); strings.Contains(body, "Library sync failed") {
+				t.Fatalf("friends failure failed the sync: %s", body)
+			}
+			if at, reason := f.syncState(t); at == nil || reason != nil {
+				t.Fatalf("after %s: stamp=%v stored error=%v", name, at, reason)
+			}
+			if games := f.userGames(t); games != 2 {
+				t.Fatalf("user_games=%d after %s, want 2", games, name)
+			}
+		})
+	}
+	t.Run("friends_and_games", func(t *testing.T) {
+		f := lsNewFixture(t)
+		f.steam.friendsErr = errors.New("friends unavailable")
+		f.steam.games = func(context.Context, string) ([]steamapi.Game, error) { return nil, errors.New("games unavailable") }
+		if body, _ := f.sync(t); !strings.Contains(body, "Library sync failed") || !strings.Contains(body, "games unavailable") {
+			t.Fatalf("body=%s", body)
+		}
+		if at, _ := f.syncState(t); at != nil {
+			t.Fatalf("stamp set after friends and games failure: %v", at)
+		}
+	})
 	cases := map[string]func(*loginSteam){
-		"friends": func(s *loginSteam) { s.games = lsLibrary; s.friendsErr = errors.New("friends unavailable") },
 		"games": func(s *loginSteam) {
 			s.games = func(context.Context, string) ([]steamapi.Game, error) { return nil, errors.New("games unavailable") }
 		},
@@ -279,6 +378,45 @@ func TestLibrarySyncStampOnlyOnSuccess(t *testing.T) {
 			t.Fatal("stamp not set after a details-only failure")
 		}
 	})
+}
+
+// Every friends refresh failure (error, partial error, panic, timeout) gets a
+// log line of its own naming the user and carrying the friends error, without
+// the Steam API key; the library error alone is returned.
+func TestLibrarySyncFriendsFailureLogged(t *testing.T) {
+	cases := map[string]struct {
+		setup func(*lsFixture)
+		want  string
+	}{
+		"error":   {func(f *lsFixture) { f.steam.friendsErr = errors.New("friends unavailable") }, "friends unavailable"},
+		"partial": {lsPartialFriends, "profiles unavailable"},
+		"panic":   {lsPanicFriends, "friends exploded"},
+		"timeout": {lsHangFriends, context.DeadlineExceeded.Error()},
+		"secret":  {func(f *lsFixture) { f.steam.friendsErr = lsSecretTransportErr() }, "connection refused"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := lsNewFixture(t)
+			f.steam.games = lsLibrary
+			tc.setup(f)
+			ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
+			defer cancel()
+			var err error
+			out := captureStdout(t, func() { err = f.app.syncFriendsAndLibrary(ctx, f.userID, testSteamID) })
+			if err != nil {
+				t.Fatalf("friends failure returned %v", err)
+			}
+			if strings.Contains(out, "SECRETKEY123") {
+				t.Fatalf("log leaks the key: %s", out)
+			}
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, testSteamID) && strings.Contains(line, fmt.Sprint(f.userID)) && strings.Contains(line, tc.want) {
+					return
+				}
+			}
+			t.Fatalf("no log line names user %d / %s with %q:\n%s", f.userID, testSteamID, tc.want, out)
+		})
+	}
 }
 
 // lsWaitLockPoller waits until a request on pool has polled the user's sync
@@ -506,13 +644,13 @@ func lsSecretTransportErr() error {
 }
 
 // A transport error carrying the Steam API key is never stored or rendered
-// with the key, for a failing library fetch or friends refresh.
+// with the key for a failing library fetch, and a failing friends refresh
+// never logs the key.
 func TestLibrarySyncFailureRedactsSecret(t *testing.T) {
 	cases := map[string]func(*loginSteam){
 		"games": func(s *loginSteam) {
 			s.games = func(context.Context, string) ([]steamapi.Game, error) { return nil, lsSecretTransportErr() }
 		},
-		"friends": func(s *loginSteam) { s.games = lsLibrary; s.friendsErr = lsSecretTransportErr() },
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
