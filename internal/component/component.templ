@@ -541,10 +541,9 @@ templ GameGrid(id string, games []steamapi.Game, showPlaytime bool) {
 	</ul>
 }
 
-// SharedGameCount pairs a shared game with its live global player count.
+// SharedGameCount represents a shared game entry in the party view.
 type SharedGameCount struct {
-	Game        steamapi.Game
-	PlayerCount int
+	Game steamapi.Game
 }
 
 templ SharedGamesWithCounts(games []SharedGameCount) {
@@ -557,7 +556,6 @@ templ SharedGamesWithCounts(games []SharedGameCount) {
 					<img src={ gameHeaderURL(entry.Game.AppID) } alt="" class="w-full" loading="lazy"/>
 					<div class="p-2.5">
 						<p class="truncate text-sm font-medium" title={ entry.Game.Name }>{ entry.Game.Name }</p>
-						<p class="text-xs text-base-content/50">{ strconv.Itoa(entry.PlayerCount) } players online now</p>
 					</div>
 				</li>
 			}

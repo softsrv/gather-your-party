@@ -20,7 +20,7 @@ import (
 	"github.com/softsrv/steamapi/steamapi"
 )
 
-// syncOnAddFakeSteam is the end-to-end fake with working player counts and an
+// syncOnAddFakeSteam is the end-to-end fake with an
 // optional Games failure per Steam id.
 type syncOnAddFakeSteam struct {
 	*endToEndFakeSteam
@@ -32,10 +32,6 @@ func (f *syncOnAddFakeSteam) Games(ctx context.Context, steamID string, a, b boo
 		return nil, err
 	}
 	return f.endToEndFakeSteam.Games(ctx, steamID, a, b)
-}
-
-func (f *syncOnAddFakeSteam) GetNumberOfCurrentPlayers(context.Context, string) (int, error) {
-	return 7, nil
 }
 
 const (

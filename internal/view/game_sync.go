@@ -42,7 +42,6 @@ type SteamService interface {
 	GameSyncService
 	Friends(context.Context, string) ([]steamapi.Friend, error)
 	Players(context.Context, []string) ([]steamapi.Player, error)
-	GetNumberOfCurrentPlayers(context.Context, string) (int, error)
 }
 
 // GameDataStore is the store surface needed to fetch and record game data.

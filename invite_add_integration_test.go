@@ -7,7 +7,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,10 +58,6 @@ func (f *endToEndFakeSteam) GamesDetails(_ context.Context, ids []int) ([]steama
 		details[i] = steamapi.GameDetail{AppID: id, Multiplayer: true}
 	}
 	return details, nil
-}
-
-func (f *endToEndFakeSteam) GetNumberOfCurrentPlayers(_ context.Context, _ string) (int, error) {
-	return 0, errors.New("unexpected player count lookup")
 }
 
 // CLM-1: A leader whose Steam friend list contains a friend with no users row

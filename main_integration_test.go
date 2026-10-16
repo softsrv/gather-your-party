@@ -478,10 +478,6 @@ func (s *loginSteam) Players(_ context.Context, ids []string) ([]steamapi.Player
 	return players, nil
 }
 
-func (s *loginSteam) GetNumberOfCurrentPlayers(context.Context, string) (int, error) {
-	return 0, errors.New("unexpected GetNumberOfCurrentPlayers call")
-}
-
 // syncCalls counts the Friends and Games calls made so far.
 func (s *loginSteam) syncCalls() int {
 	s.mu.Lock()

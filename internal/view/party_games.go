@@ -3,14 +3,12 @@ package view
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"gather-your-party/internal/component"
 	"gather-your-party/internal/db"
 	"gather-your-party/internal/syncreason"
 
 	"github.com/softsrv/steamapi/steamapi"
-	"golang.org/x/sync/errgroup"
 )
 
 // notSyncedMessageFormat names a member whose library has never been synced,
@@ -29,10 +27,9 @@ type SharedGamesStore interface {
 }
 
 // PartyGamesService is the Steam surface the party page uses: game data for
-// shared games without stored data, and live player counts.
+// shared games without stored data.
 type PartyGamesService interface {
 	GameDetailsService
-	GetNumberOfCurrentPlayers(context.Context, string) (int, error)
 }
 
 // storedSharedGames builds the shared multiplayer games of caller and others
@@ -128,9 +125,8 @@ func uniqueMembers(caller string, others []string) []string {
 }
 
 // BuildSharedGames builds the party's shared games from the stored libraries of
-// the database-loaded roster, without syncing any member, and fetches a live
-// player count for each shared game. A member who is private or not yet synced
-// becomes a named message; store and player-count failures are returned to the
+// the database-loaded roster, without syncing any member. A member who is private
+// or not yet synced becomes a named message; store failures are returned to the
 // caller without partial counts.
 func BuildSharedGames(ctx context.Context, steam PartyGamesService, store SharedGamesStore, members []db.PartyMember) ([]component.SharedGameCount, []string, error) {
 	if len(members) < 2 {
@@ -150,20 +146,8 @@ func BuildSharedGames(ctx context.Context, steam PartyGamesService, store Shared
 		return nil, append([]string{"Shared games cannot be computed."}, messages...), nil
 	}
 	counts := make([]component.SharedGameCount, len(games))
-	fetches, countCtx := errgroup.WithContext(ctx)
 	for i, game := range games {
-		fetches.Go(func() error {
-			count, err := steam.GetNumberOfCurrentPlayers(countCtx, strconv.Itoa(game.AppID))
-			if err != nil {
-				return fmt.Errorf("party shared games: player count: %w", err)
-			}
-			// Each worker owns its slot; completion order cannot swap game counts.
-			counts[i] = component.SharedGameCount{Game: game, PlayerCount: count}
-			return nil
-		})
-	}
-	if err := fetches.Wait(); err != nil {
-		return nil, nil, err
+		counts[i] = component.SharedGameCount{Game: game}
 	}
 	return counts, nil, nil
 }

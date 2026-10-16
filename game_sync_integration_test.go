@@ -38,7 +38,6 @@ type gameSyncSteam struct {
 	details      func(context.Context, []int) ([]steamapi.GameDetail, error)
 	gamesCalls   []string
 	detailsCalls [][]int
-	countCalls   []string
 }
 
 func (s *gameSyncSteam) Games(_ context.Context, steamID string, appInfo, freeGames bool) ([]steamapi.Game, error) {
@@ -85,14 +84,6 @@ func (s *gameSyncSteam) Players(_ context.Context, ids []string) ([]steamapi.Pla
 		players[i] = steamapi.Player{SteamID: id, PersonaName: "Persona " + id[len(id)-3:]}
 	}
 	return players, nil
-}
-
-func (s *gameSyncSteam) GetNumberOfCurrentPlayers(_ context.Context, appID string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.countCalls = append(s.countCalls, appID)
-	id, _ := strconv.Atoi(appID)
-	return id * 10, nil
 }
 
 func (s *gameSyncSteam) requested() []int {
@@ -557,10 +548,8 @@ func TestViewsReturnStoredMultiplayerIntersectionInCallerOrder(t *testing.T) {
 	if got := partyRendered(t, party); !slices.Equal(got, wantParty) {
 		t.Fatalf("party=%+v want %+v", got, wantParty)
 	}
-	for _, w := range wantParty {
-		if !strings.Contains(party, fmt.Sprintf("%d players online now", w.AppID*10)) {
-			t.Errorf("missing live count for %d", w.AppID)
-		}
+	if strings.Contains(party, "players online now") {
+		t.Errorf("party page unexpectedly contains 'players online now': %s", party)
 	}
 }
 
