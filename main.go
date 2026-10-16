@@ -399,9 +399,12 @@ func (app *application) runLibrarySync(ctx context.Context, userID int64, steamI
 	return true, reason
 }
 
-// syncFriendsAndLibrary refreshes the user's friends and stores their library;
-// a friends failure does not stop the library sync but still fails the result.
-// A failure fetching game details alone is logged, not returned; a panic is.
+// syncFriendsAndLibrary refreshes the user's friends and stores their library.
+// The friends refresh is best effort: its failure (error, partial error, panic
+// or timeout) is logged and never fails the result, and it runs on its own
+// sub-deadline so it cannot use up the library save's time. A failure fetching
+// game details alone is logged, not returned; any other library error is, and
+// so is a panic outside the friends refresh.
 func (app *application) syncFriendsAndLibrary(ctx context.Context, userID int64, steamID string) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -409,13 +412,33 @@ func (app *application) syncFriendsAndLibrary(ctx context.Context, userID int64,
 		}
 	}()
 	steam := app.steamService()()
-	friendsErr := app.syncLogin(ctx, steam, steamID)
+	if friendsErr := app.refreshFriends(ctx, steam, steamID); friendsErr != nil {
+		fmt.Printf("library sync %s (user %d): friends refresh failed: %s\n", steamID, userID, syncreason.Scrub(friendsErr.Error()))
+	}
 	gamesErr := view.SyncUserGames(ctx, steam, app.store, userID, steamID)
 	if errors.Is(gamesErr, view.ErrGameDetails) {
 		fmt.Printf("library sync %s: %s\n", steamID, gamesErr)
 		gamesErr = nil
 	}
-	return errors.Join(friendsErr, gamesErr)
+	return gamesErr
+}
+
+// refreshFriends runs the friends refresh on a sub-deadline of half the time
+// left on ctx (half the default sync timeout when ctx has none) and turns a
+// panic inside it into an error.
+func (app *application) refreshFriends(ctx context.Context, steam view.SteamService, steamID string) (err error) {
+	budget := defaultLibrarySyncTimeout / 2
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = time.Until(deadline) / 2
+	}
+	friendsCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("friends refresh panic: %v", rec)
+		}
+	}()
+	return app.syncLogin(friendsCtx, steam, steamID)
 }
 
 // storedSyncOutcome reports the stored outcome of the user's last library sync:
