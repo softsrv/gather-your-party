@@ -27,8 +27,9 @@ type partyDetailStore struct {
 	checkedUser  int64
 	loadedParty  string
 	// sharedErr, when set, makes the shared-games sync and library reads fail.
-	sharedErr   error
-	sharedCalls int
+	sharedErr       error
+	sharedStoredErr error
+	sharedCalls     int
 }
 
 func (s *partyDetailStore) GameSyncStates(ctx context.Context, ids []string) (map[string]db.GameSyncState, error) {
@@ -41,6 +42,9 @@ func (s *partyDetailStore) GameSyncStates(ctx context.Context, ids []string) (ma
 
 func (s *partyDetailStore) SharedStoredGames(ctx context.Context, first string, rest []string) ([]db.StoredGame, error) {
 	s.sharedCalls++
+	if s.sharedStoredErr != nil {
+		return nil, s.sharedStoredErr
+	}
 	if s.sharedErr != nil {
 		return nil, s.sharedErr
 	}
@@ -231,11 +235,16 @@ func captureStdout(t *testing.T, fn func()) string {
 // server-side via stdout, and the raw error never reaches the response body.
 func TestPartyDetailSharedGamesFailure(t *testing.T) {
 	old := http.DefaultTransport
-	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("private Steam failure details")
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected Steam endpoint: %s", r.URL.Path)
+		return nil, errors.New("unexpected Steam endpoint")
 	})
 	t.Cleanup(func() { http.DefaultTransport = old })
-	store := &partyDetailStore{leaveStore: leaveStore{found: true}, member: true}
+	store := &partyDetailStore{
+		leaveStore:      leaveStore{found: true},
+		member:          true,
+		sharedStoredErr: errors.New("private store failure details"),
+	}
 	store.syncedGames = []db.StoredGame{{AppID: 10, Name: "Stored", DataFetched: true, HasData: true, Multiplayer: true}}
 	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
 	w := httptest.NewRecorder()
@@ -252,10 +261,10 @@ func TestPartyDetailSharedGamesFailure(t *testing.T) {
 	if !strings.Contains(body, sharedGamesUnavailableMessage) {
 		t.Fatalf("missing generic shared-games-unavailable message: %s", body)
 	}
-	if strings.Contains(body, "private Steam failure details") {
-		t.Fatalf("response body leaked the underlying Steam error: %s", body)
+	if strings.Contains(body, "private store failure details") {
+		t.Fatalf("response body leaked the underlying store error: %s", body)
 	}
-	if !strings.Contains(stdout, "private Steam failure details") {
+	if !strings.Contains(stdout, "private store failure details") {
 		t.Fatalf("underlying error was not recorded server-side: stdout=%s", stdout)
 	}
 }
@@ -269,8 +278,6 @@ func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
 	old := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/v0001"):
-			return nil, errors.New("private Steam failure details")
 		case strings.Contains(r.URL.Path, "/GetFriendList/"):
 			body := `{"friendslist":{"friends":[{"steamid":"` + friendID + `","relationship":"friend","friend_since":1}]}}`
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
@@ -286,6 +293,7 @@ func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
 	store := &partyDetailStore{
 		leaveStore: leaveStore{found: true, candidates: []db.InviteCandidate{{UserID: 89, Name: "Eligible friend"}}},
 		member:     true, leader: true,
+		sharedStoredErr: errors.New("private store failure details"),
 	}
 	store.syncedGames = []db.StoredGame{{AppID: 10, Name: "Stored", DataFetched: true, HasData: true, Multiplayer: true}}
 	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
@@ -306,10 +314,10 @@ func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
 	if !strings.Contains(body, sharedGamesUnavailableMessage) {
 		t.Fatalf("missing generic shared-games-unavailable message: %s", body)
 	}
-	if strings.Contains(body, "private Steam failure details") {
-		t.Fatalf("response body leaked the underlying Steam error: %s", body)
+	if strings.Contains(body, "private store failure details") {
+		t.Fatalf("response body leaked the underlying store error: %s", body)
 	}
-	if !strings.Contains(stdout, "private Steam failure details") {
+	if !strings.Contains(stdout, "private store failure details") {
 		t.Fatalf("underlying error was not recorded server-side: stdout=%s", stdout)
 	}
 }
@@ -410,7 +418,7 @@ func TestPartyDetailTwoMemberPartyOmitsInviteNote(t *testing.T) {
 const soloInviteNote = "Invite someone to your party to see the games you have in common."
 
 // serveSoloLeaderDetail renders the party page for a solo leader against a
-// Steam fake whose friends lookup succeeds and whose player-count call fails.
+// Steam fake whose friends lookup succeeds.
 // It returns the response and the number of friends requests made.
 func serveSoloLeaderDetail(t *testing.T, store *partyDetailStore) (*httptest.ResponseRecorder, int) {
 	t.Helper()
@@ -421,8 +429,6 @@ func serveSoloLeaderDetail(t *testing.T, store *partyDetailStore) (*httptest.Res
 	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var body string
 		switch {
-		case strings.Contains(r.URL.Path, "/GetNumberOfCurrentPlayers/"):
-			return nil, errors.New("private Steam failure details")
 		case strings.Contains(r.URL.Path, "/GetFriendList/"):
 			friendCalls++
 			body = `{"friendslist":{"friends":[{"steamid":"` + friendID + `","relationship":"friend","friend_since":1}]}}`
@@ -469,7 +475,7 @@ func assertSoloInviteNote(t *testing.T, w *httptest.ResponseRecorder, friendCall
 }
 
 // A solo leader sees the invite note even when every shared-games dependency
-// would fail: the sync and library reads, and Steam's player counts.
+// would fail: the sync and library reads.
 func TestPartyDetailSoloLeaderFailingSharedGamesShowsInviteNote(t *testing.T) {
 	store := &partyDetailStore{
 		leaveStore: leaveStore{found: true},

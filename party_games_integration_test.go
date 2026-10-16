@@ -190,12 +190,20 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 			}
 			for i, item := range items {
 				wantID := fmt.Sprint(games[i].AppID)
-				if item[1] != wantID || !strings.Contains(item[2], games[i].Name) || !strings.Contains(item[2], fmt.Sprintf("%d players online now", counts[wantID])) {
-					t.Errorf("game/count pairing incorrect: %s", item[0])
+				wantHeader := fmt.Sprintf(`src="https://cdn.cloudflare.steamstatic.com/steam/apps/%s/header.jpg"`, wantID)
+				if item[1] != wantID || !strings.Contains(item[2], games[i].Name) || !strings.Contains(item[2], wantHeader) {
+					t.Errorf("game/image pairing incorrect: %s", item[0])
 				}
-				if countCalls[wantID] != 1 {
-					t.Errorf("live count calls for %s=%d want=1", wantID, countCalls[wantID])
-				}
+			}
+			if strings.Contains(body, "players online now") {
+				t.Errorf("rendered page contains player count: %s", body)
+			}
+			totalCountCalls := 0
+			for _, calls := range countCalls {
+				totalCountCalls += calls
+			}
+			if totalCountCalls != 0 {
+				t.Errorf("expected 0 count calls, got %d (%v)", totalCountCalls, countCalls)
 			}
 			for _, excluded := range []string{"Only first two", "Leader exclusive"} {
 				if strings.Contains(body, excluded) {

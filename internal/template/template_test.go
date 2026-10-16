@@ -26,7 +26,7 @@ func TestPartyDetailSharedGamesSoloMember(t *testing.T) {
 	}{
 		{name: "no games, no messages"},
 		{name: "with messages", gamesMessages: []string{"Shared games cannot be computed."}},
-		{name: "with shared games", sharedGames: []component.SharedGameCount{{Game: steamapi.Game{AppID: 10, Name: "Game"}, PlayerCount: 5}}},
+		{name: "with shared games", sharedGames: []component.SharedGameCount{{Game: steamapi.Game{AppID: 10, Name: "Game"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer

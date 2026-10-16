@@ -502,10 +502,6 @@ func (f *fakeSteamRouteService) Players(context.Context, []string) ([]steamapi.P
 	return nil, nil
 }
 
-func (f *fakeSteamRouteService) GetNumberOfCurrentPlayers(context.Context, string) (int, error) {
-	return 0, nil
-}
-
 func TestLibraryListingRouteIsGone(t *testing.T) {
 	secret := "test-secret"
 	store := &fakeSessionStore{resolvedSteamID: testSteamID}

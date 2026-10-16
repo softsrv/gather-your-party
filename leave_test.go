@@ -176,10 +176,6 @@ func (inviteSteam) GamesDetails(context.Context, []int) ([]steamapi.GameDetail, 
 	return nil, errors.New("unexpected GamesDetails call")
 }
 
-func (inviteSteam) GetNumberOfCurrentPlayers(context.Context, string) (int, error) {
-	return 0, errors.New("unexpected GetNumberOfCurrentPlayers call")
-}
-
 func inviteTestApp(store sessionStore) application {
 	return application{
 		store:  store,
