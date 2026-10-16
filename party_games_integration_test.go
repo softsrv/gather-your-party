@@ -184,15 +184,20 @@ func TestPartyDetailSharedGamesRealStore(t *testing.T) {
 				}
 				return
 			}
-			items := regexp.MustCompile(`<li data-appid="([0-9]+)"[^>]*>(.*?)</li>`).FindAllStringSubmatch(body, -1)
+			items := regexp.MustCompile(`<li data-appid="([0-9]+)" data-name="([^"]*)"[^>]*>(.*?)</li>`).FindAllStringSubmatch(body, -1)
 			if len(items) != 2 {
 				t.Fatalf("rendered games=%d want exactly 2: %s", len(items), body)
 			}
+			wantSearchInput := `data-items="#party-shared-games-grid li"`
+			if !strings.Contains(body, wantSearchInput) {
+				t.Errorf("missing search input with %s: %s", wantSearchInput, body)
+			}
 			for i, item := range items {
 				wantID := fmt.Sprint(games[i].AppID)
+				wantDataName := strings.ToLower(games[i].Name)
 				wantHeader := fmt.Sprintf(`src="https://cdn.cloudflare.steamstatic.com/steam/apps/%s/header.jpg"`, wantID)
-				if item[1] != wantID || !strings.Contains(item[2], games[i].Name) || !strings.Contains(item[2], wantHeader) {
-					t.Errorf("game/image pairing incorrect: %s", item[0])
+				if item[1] != wantID || item[2] != wantDataName || !strings.Contains(item[3], games[i].Name) || !strings.Contains(item[3], wantHeader) {
+					t.Errorf("game/image/data-name pairing incorrect: %s (wantID=%s wantDataName=%s)", item[0], wantID, wantDataName)
 				}
 			}
 			if strings.Contains(body, "players online now") {
