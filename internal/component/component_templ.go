@@ -494,7 +494,7 @@ func Navbar(nav NavState) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "<a href=\"/auth/steam\" class=\"btn btn-primary btn-sm ml-auto\">Sign in</a>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "<a href=\"/auth/steam\" class=\"ml-auto\"><img src=\"https://community.fastly.steamstatic.com/public/images/signinthroughsteam/sits_01.png\" alt=\"Sign in through Steam\" width=\"180\" height=\"35\"></a>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2370,15 +2370,7 @@ func Signin() templ.Component {
 			templ_7745c5c3_Var99 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 188, "<section class=\"grid items-center gap-12 py-8 lg:grid-cols-[1.1fr_1fr] lg:py-16\"><div><p class=\"eyebrow\">Game night, organized</p><h1 class=\"mt-3 text-5xl font-extrabold leading-[1.05] sm:text-6xl\">Gather your party. <span class=\"block bg-gradient-to-r from-primary via-[#f59e8b] to-secondary bg-clip-text text-transparent\">Skip the group chat.</span></h1><p class=\"mt-5 max-w-xl text-lg text-base-content/70\">Form a party with your Steam friends, then instantly see which games everyone already owns, so you spend game night playing instead of deciding.</p><div class=\"mt-8 flex flex-wrap items-center gap-4\"><a href=\"/auth/steam\" class=\"btn btn-primary btn-lg gap-3 shadow-lg shadow-primary/20\">")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = Icon("gamepad", "h-5 w-5").Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 189, " Sign in through Steam</a><p class=\"max-w-[16rem] text-xs text-base-content/50\">We only read your public Steam profile, friends list, and game library.</p></div></div><div class=\"relative mx-auto w-full max-w-md\" aria-hidden=\"true\"><div class=\"absolute inset-0 rounded-[2rem] sm:-inset-6 bg-gradient-to-br from-primary/20 via-transparent to-secondary/25 blur-2xl\"></div><div class=\"panel relative rotate-[-2deg] p-5\"><div class=\"flex items-center justify-between\"><p class=\"font-display text-lg font-bold\">Friday Night Raid</p><span class=\"badge badge-primary badge-sm\">4 members</span></div><div class=\"mt-4 flex -space-x-2\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 188, "<section class=\"grid items-center gap-12 py-8 lg:grid-cols-[1.1fr_1fr] lg:py-16\"><div><p class=\"eyebrow\">Game night, organized</p><h1 class=\"mt-3 text-5xl font-extrabold leading-[1.05] sm:text-6xl\">Gather your party. <span class=\"block bg-gradient-to-r from-primary via-[#f59e8b] to-secondary bg-clip-text text-transparent\">Skip the group chat.</span></h1><p class=\"mt-5 max-w-xl text-lg text-base-content/70\">Form a party with your Steam friends, then instantly see which games everyone already owns, so you spend game night playing instead of deciding.</p><div class=\"mt-8 flex flex-wrap items-center gap-4\"><a href=\"/auth/steam\"><img src=\"https://community.fastly.steamstatic.com/public/images/signinthroughsteam/sits_01.png\" alt=\"Sign in through Steam\" width=\"180\" height=\"35\"></a><p class=\"max-w-[16rem] text-xs text-base-content/50\">We only read your public Steam profile, friends list, and game library.</p></div></div><div class=\"relative mx-auto w-full max-w-md\" aria-hidden=\"true\"><div class=\"absolute inset-0 rounded-[2rem] sm:-inset-6 bg-gradient-to-br from-primary/20 via-transparent to-secondary/25 blur-2xl\"></div><div class=\"panel relative rotate-[-2deg] p-5\"><div class=\"flex items-center justify-between\"><p class=\"font-display text-lg font-bold\">Friday Night Raid</p><span class=\"badge badge-primary badge-sm\">4 members</span></div><div class=\"mt-4 flex -space-x-2\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2388,7 +2380,7 @@ func Signin() templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 190, "<span class=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 189, "<span class=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2401,48 +2393,48 @@ func Signin() templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 191, "\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 190, "\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var102 string
 			templ_7745c5c3_Var102, templ_7745c5c3_Err = templ.JoinStringErrs(name)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 635, Col: 211}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 634, Col: 211}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var102))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 192, "</span>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 191, "</span>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 193, "</div><div class=\"mt-5 rounded-xl bg-base-200/80 p-4\"><p class=\"text-xs font-semibold uppercase tracking-wider text-base-content/50\">Everyone owns</p><div class=\"mt-3 flex flex-wrap gap-2\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 192, "</div><div class=\"mt-5 rounded-xl bg-base-200/80 p-4\"><p class=\"text-xs font-semibold uppercase tracking-wider text-base-content/50\">Everyone owns</p><div class=\"mt-3 flex flex-wrap gap-2\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		for _, game := range []string{"Deep Rock Galactic", "Baldur's Gate 3", "Lethal Company", "Stardew Valley"} {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 194, "<span class=\"badge badge-outline gap-1 py-3\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 193, "<span class=\"badge badge-outline gap-1 py-3\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var103 string
 			templ_7745c5c3_Var103, templ_7745c5c3_Err = templ.JoinStringErrs(game)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 642, Col: 58}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 641, Col: 58}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var103))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 195, "</span>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 194, "</span>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 196, "</div></div></div></div></section><section class=\"grid gap-4 pb-8 sm:grid-cols-3\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 195, "</div></div></div></div></section><section class=\"grid gap-4 pb-8 sm:grid-cols-3\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2458,7 +2450,7 @@ func Signin() templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 197, "</section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 196, "</section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2487,7 +2479,7 @@ func Step(number string, icon string, title string, text string) templ.Component
 			templ_7745c5c3_Var104 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 198, "<div class=\"panel p-5\"><div class=\"flex items-center gap-3\"><span class=\"grid h-10 w-10 place-items-center rounded-xl bg-white/5 text-primary\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 197, "<div class=\"panel p-5\"><div class=\"flex items-center gap-3\"><span class=\"grid h-10 w-10 place-items-center rounded-xl bg-white/5 text-primary\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2495,46 +2487,46 @@ func Step(number string, icon string, title string, text string) templ.Component
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 199, "</span> <span class=\"font-display text-sm font-bold text-base-content/40\">Step ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 198, "</span> <span class=\"font-display text-sm font-bold text-base-content/40\">Step ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var105 string
 		templ_7745c5c3_Var105, templ_7745c5c3_Err = templ.JoinStringErrs(number)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 662, Col: 82}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 661, Col: 82}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var105))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 200, "</span></div><h2 class=\"mt-4 text-lg font-bold\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 199, "</span></div><h2 class=\"mt-4 text-lg font-bold\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var106 string
 		templ_7745c5c3_Var106, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 664, Col: 44}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 663, Col: 44}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var106))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 201, "</h2><p class=\"mt-1 text-sm text-base-content/60\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 200, "</h2><p class=\"mt-1 text-sm text-base-content/60\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var107 string
 		templ_7745c5c3_Var107, templ_7745c5c3_Err = templ.JoinStringErrs(text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 665, Col: 53}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/component/component.templ`, Line: 664, Col: 53}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var107))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 202, "</p></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 201, "</p></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

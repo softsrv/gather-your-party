@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -427,6 +428,9 @@ func TestSignedInHomeOffersPostLogout(t *testing.T) {
 	if !strings.Contains(html.String(), `<form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form>`) {
 		t.Fatal("signed-in home must offer the POST logout action")
 	}
+	if strings.Contains(html.String(), "sits_01.png") || strings.Contains(html.String(), `href="/auth/steam"`) {
+		t.Fatal("signed-in home must not render the Steam sign-in image or link")
+	}
 }
 
 func TestSignedOutHomeOffersSteamSignIn(t *testing.T) {
@@ -435,8 +439,32 @@ func TestSignedOutHomeOffersSteamSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := html.String()
-	if !strings.Contains(output, `href="/auth/steam"`) || strings.Count(output, "Sign in through Steam") != 1 {
-		t.Fatal("missing single Steam sign-in action")
+	const img = `<img src="https://community.fastly.steamstatic.com/public/images/signinthroughsteam/sits_01.png" alt="Sign in through Steam" width="180" height="35">`
+	anchors := regexp.MustCompile(`<a href="/auth/steam"([^>]*)>(.*?)</a>`).FindAllStringSubmatch(output, -1)
+	if len(anchors) != 2 {
+		t.Fatalf("want 2 /auth/steam anchors (top bar and landing), got %d", len(anchors))
+	}
+	for _, a := range anchors {
+		if strings.TrimSpace(a[2]) != img {
+			t.Errorf("/auth/steam anchor must contain only the Steam sign-in image, got %q", a[2])
+		}
+		if strings.Contains(a[1], "btn") {
+			t.Errorf("/auth/steam anchor must not carry button classes: %q", a[1])
+		}
+	}
+	if !strings.Contains(output, `class="ml-auto"><img`) {
+		t.Error("top-bar sign-in anchor must stay right-aligned")
+	}
+	if !strings.Contains(output, `class="mx-auto flex h-16 `) {
+		t.Error("nav must keep its fixed h-16 height")
+	}
+	for _, gone := range []string{">Sign in</a>", "gamepad"} {
+		if strings.Contains(output, gone) {
+			t.Errorf("signed-out home still contains %q", gone)
+		}
+	}
+	if strings.Contains(output, ">Sign in through Steam<") || strings.Contains(output, "> Sign in through Steam") {
+		t.Error("visible sign-in text node must be gone")
 	}
 	for _, forbidden := range []string{`hx-post="/login"`, `href="/login"`, `name="steamID"`, "<input", "<form"} {
 		if strings.Contains(output, forbidden) {

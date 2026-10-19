@@ -161,7 +161,7 @@ templ Navbar(nav NavState) {
 					</ul>
 				</div>
 			} else {
-				<a href="/auth/steam" class="btn btn-primary btn-sm ml-auto">Sign in</a>
+				<a href="/auth/steam" class="ml-auto"><img src="https://community.fastly.steamstatic.com/public/images/signinthroughsteam/sits_01.png" alt="Sign in through Steam" width="180" height="35"/></a>
 			}
 		</nav>
 	</header>
@@ -616,9 +616,8 @@ templ Signin() {
 				Form a party with your Steam friends, then instantly see which games everyone already owns, so you spend game night playing instead of deciding.
 			</p>
 			<div class="mt-8 flex flex-wrap items-center gap-4">
-				<a href="/auth/steam" class="btn btn-primary btn-lg gap-3 shadow-lg shadow-primary/20">
-					@Icon("gamepad", "h-5 w-5")
-					Sign in through Steam
+				<a href="/auth/steam">
+					<img src="https://community.fastly.steamstatic.com/public/images/signinthroughsteam/sits_01.png" alt="Sign in through Steam" width="180" height="35"/>
 				</a>
 				<p class="max-w-[16rem] text-xs text-base-content/50">We only read your public Steam profile, friends list, and game library.</p>
 			</div>
