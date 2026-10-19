@@ -22,8 +22,10 @@ var (
 	// urlQuery matches an http(s) URL with its query string or fragment.
 	urlQuery = regexp.MustCompile(`(?i)(https?://[^\s"'?#]*)[?#][^\s"']*`)
 	// keyParam matches a key=<value> pair wherever it remains, in a query
-	// string or bare.
-	keyParam = regexp.MustCompile(`(?i)(\bkey=)[^&\s"']+`)
+	// string or bare. It matches key= at the end of any parameter name
+	// (api_key, steam_key, apikey, api-key), and words like monkey= are
+	// redacted too, which is accepted.
+	keyParam = regexp.MustCompile(`(?i)(key=)[^&\s"']+`)
 )
 
 // Reason returns the reason for a failed sync. A deadline maps to
