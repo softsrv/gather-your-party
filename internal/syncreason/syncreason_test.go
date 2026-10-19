@@ -43,13 +43,41 @@ func TestReasonPlainErrorPassesThrough(t *testing.T) {
 }
 
 func TestScrubRedactsKeyAndQueryStrings(t *testing.T) {
-	in := `bad https://api.steampowered.com/a/b?key=SECRETKEY123&x=1 and /p?foo=1&KEY=SECRETKEY123 "key=SECRETKEY123"`
+	in := `bad https://api.steampowered.com/a/b?key=SECRETKEY123&x=1 and /p?foo=1&KEY=SECRETKEY123 "key=SECRETKEY123" key=SECRETKEY123`
 	got := Scrub(in)
 	if strings.Contains(got, "SECRETKEY123") {
 		t.Fatalf("scrub leaks: %q", got)
 	}
 	if !strings.Contains(got, "https://api.steampowered.com/a/b") {
 		t.Fatalf("scrub dropped the URL path: %q", got)
+	}
+}
+
+func TestScrubRedactsSuffixedKeyParams(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"bare api_key", "api_key=SECRET"},
+		{"bare steam_key", "steam_key=SECRET"},
+		{"bare apikey", "apikey=SECRET"},
+		{"bare API-KEY", "API-KEY=SECRET"},
+		{"relative query api_key", "/p?api_key=SECRET&x=1"},
+		{"relative query steam_key", "/p?steam_key=SECRET&x=1"},
+		{"relative query apikey", "/p?apikey=SECRET&x=1"},
+		{"relative query API-KEY", "/p?API-KEY=SECRET&x=1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Scrub(tt.in)
+			if strings.Contains(got, "SECRET") {
+				t.Fatalf("scrub leaks SECRET in %s: %q", tt.name, got)
+			}
+			if !strings.Contains(got, "REDACTED") {
+				t.Fatalf("scrub missing REDACTED marker in %s: %q", tt.name, got)
+			}
+		})
 	}
 }
 
