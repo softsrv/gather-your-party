@@ -30,7 +30,7 @@ templ Base(title string) {
 			<link rel="stylesheet" href="/static/css/output.css"/>
 			<title>{ title }</title>
 		</head>
-		<body class="min-h-screen">
+		<body class="min-h-screen flex flex-col">
 			{ children... }
 		</body>
 	</html>
@@ -54,11 +54,12 @@ func withLibrarySyncDue(ctx context.Context, nav component.NavState) component.N
 templ Page(title string, nav component.NavState) {
 	@Base(title) {
 		@component.Navbar(withLibrarySyncDue(ctx, nav))
-		<main class="mx-auto grid max-w-6xl gap-8 px-4 py-8 sm:px-6 sm:py-10">
+		<main class="mx-auto grid w-full flex-1 max-w-6xl gap-8 px-4 py-8 sm:px-6 sm:py-10">
 			{ children... }
 		</main>
-		<footer class="mx-auto max-w-6xl px-4 pb-10 pt-4 text-xs text-base-content/40 sm:px-6">
-			Gather Your Party · Not affiliated with Valve. Steam data comes from the Steam Web API.
+		<footer class="mx-auto w-full max-w-6xl px-4 pb-10 pt-4 text-xs text-base-content/40 sm:px-6">
+			<p>© 2026 softsrv</p>
+			<p>Gather Your Party · Not affiliated with Valve. Steam data comes from the Steam Web API.</p>
 		</footer>
 	}
 }
