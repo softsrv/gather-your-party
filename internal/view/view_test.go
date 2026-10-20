@@ -2,10 +2,15 @@ package view
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"gather-your-party/internal/db"
+	"gather-your-party/internal/middleware"
 )
 
 func TestStoredSharedGamesMessagesUseNamesWithSteamIDFallback(t *testing.T) {
@@ -34,5 +39,22 @@ func TestStoredSharedGamesOmitsFailedFetchWithoutError(t *testing.T) {
 	games, messages, err := storedSharedGames(context.Background(), context.Background(), steam, store, "caller", []string{"friend"}, nil)
 	if err != nil || len(messages) != 0 || len(games) != 1 || games[0].AppID != 1 {
 		t.Fatalf("games=%v messages=%v err=%v", games, messages, err)
+	}
+}
+
+// CLM-3: a signed-out request to the friends-list handler gets the full sign-in
+// page, footer included.
+func TestSignedOutFragmentRequestGetsSigninPageWithFooter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/friends", nil)
+	ctx := &middleware.CustomContext{Context: context.Background(), StartTime: time.Now()}
+
+	FriendsList(ctx, rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{"<!doctype html>", "/auth/steam", "2026 softsrv", "Not affiliated with Valve"} {
+		if !strings.Contains(strings.ToLower(body), strings.ToLower(want)) {
+			t.Errorf("signed-out response lacks %q: %s", want, body)
+		}
 	}
 }
