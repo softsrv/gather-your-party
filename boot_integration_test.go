@@ -99,6 +99,36 @@ func TestBootConnectsAndMigratesBeforeServing(t *testing.T) {
 	}
 }
 
+// Google Calendar CLM-8: the Google client credentials are optional. With
+// either one unset, startup still reaches serve and Google stays unavailable.
+func TestBootServesWithoutGoogleCredentials(t *testing.T) {
+	for _, setID := range []bool{false, true} {
+		t.Run(map[bool]string{false: "both unset", true: "secret unset"}[setID], func(t *testing.T) {
+			ctx, _ := bootIntegrationPool(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("SESSION_SECRET", "boot-secret")
+			t.Setenv("APP_BASE_URL", "https://example.com")
+			unsetBootEnv(t, "GOOGLE_CLIENT_ID")
+			unsetBootEnv(t, "GOOGLE_CLIENT_SECRET")
+			if setID {
+				t.Setenv("GOOGLE_CLIENT_ID", "client-id")
+			}
+			served := false
+			stopped := errors.New("server stopped")
+			err := run(ctx, func(app *application) error {
+				served = true
+				if app.config.googleAvailable() {
+					t.Error("Google must be unavailable without both credentials")
+				}
+				return stopped
+			})
+			if !served || !errors.Is(err, stopped) {
+				t.Fatalf("served = %v, error %v", served, err)
+			}
+		})
+	}
+}
+
 // CLM-1: the second run leaves exactly the original tracking rows/timestamps.
 func TestMigrateSkipsAppliedFiles(t *testing.T) {
 	ctx, pool := bootIntegrationPool(t)
@@ -128,13 +158,13 @@ func TestMigrateSkipsAppliedFiles(t *testing.T) {
 		return result
 	}
 	before := applied()
-	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"} {
+	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0006_google_calendar_connections.sql"} {
 		if before[filename].IsZero() {
 			t.Fatalf("missing tracking row for %s", filename)
 		}
 	}
-	if len(before) != 5 {
-		t.Fatalf("applied %d migrations, want 5", len(before))
+	if len(before) != 6 {
+		t.Fatalf("applied %d migrations, want 6", len(before))
 	}
 	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)

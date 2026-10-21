@@ -24,7 +24,7 @@ func partyTestStore(t *testing.T) (*Store, *pgxpool.Pool, context.Context) {
 }
 
 // allTestMigrations lists every migration in the order the runner applies them.
-var allTestMigrations = []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"}
+var allTestMigrations = []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0006_google_calendar_connections.sql"}
 
 // applyTestMigrations executes the named files from migrations/ in order.
 func applyTestMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool, files ...string) {

@@ -145,6 +145,7 @@ func TestPageFooterShowsCopyrightAndValveDisclaimer(t *testing.T) {
 		{"Home main", renderString(t, Home(player, "t", Main))},
 		{"ErrorPage", renderString(t, ErrorPage("t", "boom"))},
 		{"PartiesPage", renderString(t, PartiesPage(player, nil, nil))},
+		{"ProfilePage", renderString(t, ProfilePage(player, component.CalendarState{}))},
 		{"PartyDetail", renderString(t, PartyDetail(player, "party-1", "Party", members, true, nil, nil, nil, nil))},
 		{"LeaveParty", renderString(t, LeaveParty(player, "party-1"))},
 	}
@@ -358,4 +359,179 @@ func TestOnlyBaseEmitsDocumentShell(t *testing.T) {
 			t.Fatal("scanned no files")
 		}
 	})
+}
+
+// CLM-1: ProfilePage renders inside the shared Page chrome (navbar with the
+// account menu and the shared footer), has a profile header section
+// (id="profile-header") showing the player's name and full-size avatar, and
+// contains a Calendars section with a stable identifier (id="calendars") and a
+// 'Calendars' heading where calendar connections are listed.
+func TestProfilePage(t *testing.T) {
+	player := steamapi.Player{
+		SteamID:      "76561198000000001",
+		PersonaName:  "TestUser",
+		AvatarMedium: "https://example.com/avatar_medium.jpg",
+		AvatarFull:   "https://example.com/avatar_full.jpg",
+	}
+
+	out := renderString(t, ProfilePage(player, component.CalendarState{GoogleAvailable: true}))
+
+	// Page footer ('© 2026 softsrv')
+	if !strings.Contains(out, "© 2026 softsrv") {
+		t.Fatalf("missing Page footer in ProfilePage output: %s", out)
+	}
+
+	// Navbar (contains <nav and the navbar account menu rendering AvatarMedium)
+	if !strings.Contains(out, "<nav") {
+		t.Fatalf("missing navbar in ProfilePage output: %s", out)
+	}
+	if !strings.Contains(out, player.AvatarMedium) {
+		t.Fatalf("navbar should render AvatarMedium: %s", out)
+	}
+
+	// id="profile-header" element contains PersonaName and AvatarFull URL
+	profileHeaderRe := regexp.MustCompile(`(?s)<section[^>]*id="profile-header"[^>]*>(.*?)</section>`)
+	headerMatch := profileHeaderRe.FindStringSubmatch(out)
+	if headerMatch == nil {
+		t.Fatalf("missing id=\"profile-header\" section in ProfilePage: %s", out)
+	}
+	headerHTML := headerMatch[1]
+	if !strings.Contains(headerHTML, player.PersonaName) {
+		t.Fatalf("profile-header section does not contain player PersonaName %q: %s", player.PersonaName, headerHTML)
+	}
+	if !strings.Contains(headerHTML, player.AvatarFull) {
+		t.Fatalf("profile-header section does not contain player AvatarFull %q: %s", player.AvatarFull, headerHTML)
+	}
+
+	// element id="calendars" contains 'Calendars' heading
+	calendarsRe := regexp.MustCompile(`(?s)<section[^>]*id="calendars"[^>]*>(.*?)</section>`)
+	calendarsMatch := calendarsRe.FindStringSubmatch(out)
+	if calendarsMatch == nil {
+		t.Fatalf("missing id=\"calendars\" section in ProfilePage: %s", out)
+	}
+	calHTML := calendarsMatch[1]
+	if !strings.Contains(calHTML, "Calendars") {
+		t.Fatalf("calendars section does not contain 'Calendars' heading: %s", calHTML)
+	}
+}
+
+func calendarsSection(t *testing.T, out string) string {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)<section[^>]*id="calendars"[^>]*>(.*?)</section>`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("missing id=\"calendars\" section: %s", out)
+	}
+	return m[1]
+}
+
+func profileCalendarPlayer() steamapi.Player {
+	return steamapi.Player{SteamID: "76561198000000001", PersonaName: "TestUser", AvatarFull: "https://example.com/a.jpg", AvatarMedium: "https://example.com/m.jpg"}
+}
+
+// CLM-1: with Google available and no connection, the section reads 'not
+// connected' with a connect control and shows no error.
+func TestProfilePageCalendarNotConnected(t *testing.T) {
+	out := renderString(t, ProfilePage(profileCalendarPlayer(), component.CalendarState{GoogleAvailable: true}))
+	cal := calendarsSection(t, out)
+	if !strings.Contains(cal, "not connected") {
+		t.Fatalf("want 'not connected': %s", cal)
+	}
+	if !strings.Contains(cal, `href="`+component.GoogleCalendarConnectPath+`"`) {
+		t.Fatalf("want connect control targeting %s: %s", component.GoogleCalendarConnectPath, cal)
+	}
+	if strings.Contains(strings.ToLower(out), "couldn't connect") || strings.Contains(out, "role=\"alert\"") {
+		t.Fatalf("no error expected: %s", cal)
+	}
+}
+
+// CLM-2: unavailable beats not-connected; connected beats unavailable.
+func TestProfilePageCalendarPrecedence(t *testing.T) {
+	player := profileCalendarPlayer()
+
+	unavailable := renderString(t, ProfilePage(player, component.CalendarState{}))
+	cal := calendarsSection(t, unavailable)
+	if !strings.Contains(cal, "unavailable") {
+		t.Fatalf("want 'unavailable': %s", cal)
+	}
+	if strings.Contains(unavailable, component.GoogleCalendarConnectPath) || strings.Contains(unavailable, "accounts.google.com") || strings.Contains(cal, "not connected") {
+		t.Fatalf("unavailable must offer no connect control or google link: %s", cal)
+	}
+
+	// positive control
+	available := calendarsSection(t, renderString(t, ProfilePage(player, component.CalendarState{GoogleAvailable: true})))
+	if !strings.Contains(available, "not connected") || strings.Contains(available, "unavailable") {
+		t.Fatalf("available must flip to not-connected: %s", available)
+	}
+
+	connected := calendarsSection(t, renderString(t, ProfilePage(player, component.CalendarState{Connected: true, Email: "me@example.com"})))
+	if !strings.Contains(connected, "connected") || strings.Contains(connected, "not connected") {
+		t.Fatalf("want connected: %s", connected)
+	}
+	if !strings.Contains(connected, "me@example.com") {
+		t.Fatalf("want email: %s", connected)
+	}
+	if !strings.Contains(connected, `action="`+component.GoogleCalendarDisconnectPath+`"`) || !strings.Contains(connected, `method="post"`) {
+		t.Fatalf("want disconnect POST form: %s", connected)
+	}
+	if strings.Contains(connected, "unavailable") {
+		t.Fatalf("connected must not say unavailable: %s", connected)
+	}
+}
+
+// CLM-3: the failed flag adds fixed copy beside whichever state applies.
+func TestProfilePageCalendarConnectFailed(t *testing.T) {
+	player := profileCalendarPlayer()
+	states := []struct {
+		name  string
+		state component.CalendarState
+		want  string
+	}{
+		{"not connected", component.CalendarState{GoogleAvailable: true}, "not connected"},
+		{"connected", component.CalendarState{GoogleAvailable: true, Connected: true, Email: "me@example.com"}, "me@example.com"},
+		{"unavailable", component.CalendarState{}, "unavailable"},
+	}
+	for _, tc := range states {
+		t.Run(tc.name, func(t *testing.T) {
+			failed := tc.state
+			failed.ConnectFailed = true
+			cal := calendarsSection(t, renderString(t, ProfilePage(player, failed)))
+			if !strings.Contains(cal, "Couldn't connect") {
+				t.Fatalf("want couldn't-connect message: %s", cal)
+			}
+			if !strings.Contains(cal, tc.want) {
+				t.Fatalf("want state render %q alongside failure: %s", tc.want, cal)
+			}
+			if tc.name == "connected" && !strings.Contains(cal, component.GoogleCalendarDisconnectPath) {
+				t.Fatalf("connected still shows disconnect control: %s", cal)
+			}
+			ok := calendarsSection(t, renderString(t, ProfilePage(player, tc.state)))
+			if strings.Contains(ok, "Couldn't connect") {
+				t.Fatalf("message must be absent when flag unset: %s", ok)
+			}
+		})
+	}
+}
+
+// CLM-4: no Apple calendar option in connected or unconnected states.
+func TestProfilePageNoAppleOption(t *testing.T) {
+	player := profileCalendarPlayer()
+	if strings.Contains(strings.ToLower(player.PersonaName), "apple") {
+		t.Fatal("sample persona must not contain 'apple'")
+	}
+	for name, state := range map[string]component.CalendarState{
+		"connected":   {GoogleAvailable: true, Connected: true, Email: "me@example.com"},
+		"unconnected": {GoogleAvailable: true},
+		"unavailable": {},
+		"failed":      {GoogleAvailable: true, ConnectFailed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := renderString(t, ProfilePage(player, state))
+			if strings.Contains(strings.ToLower(calendarsSection(t, out)), "apple") {
+				t.Fatalf("calendars section mentions apple: %s", out)
+			}
+			if regexp.MustCompile(`(?i)href="[^"]*apple[^"]*"`).MatchString(out) {
+				t.Fatalf("apple href in body: %s", out)
+			}
+		})
+	}
 }
