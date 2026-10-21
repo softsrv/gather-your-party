@@ -145,6 +145,7 @@ func TestPageFooterShowsCopyrightAndValveDisclaimer(t *testing.T) {
 		{"Home main", renderString(t, Home(player, "t", Main))},
 		{"ErrorPage", renderString(t, ErrorPage("t", "boom"))},
 		{"PartiesPage", renderString(t, PartiesPage(player, nil, nil))},
+		{"ProfilePage", renderString(t, ProfilePage(player))},
 		{"PartyDetail", renderString(t, PartyDetail(player, "party-1", "Party", members, true, nil, nil, nil, nil))},
 		{"LeaveParty", renderString(t, LeaveParty(player, "party-1"))},
 	}
@@ -358,4 +359,58 @@ func TestOnlyBaseEmitsDocumentShell(t *testing.T) {
 			t.Fatal("scanned no files")
 		}
 	})
+}
+
+// CLM-1: ProfilePage renders inside the shared Page chrome (navbar with the
+// account menu and the shared footer), has a profile header section
+// (id="profile-header") showing the player's name and full-size avatar, and
+// contains a Calendars section with a stable identifier (id="calendars") and a
+// 'Calendars' heading where calendar connections are listed.
+func TestProfilePage(t *testing.T) {
+	player := steamapi.Player{
+		SteamID:      "76561198000000001",
+		PersonaName:  "TestUser",
+		AvatarMedium: "https://example.com/avatar_medium.jpg",
+		AvatarFull:   "https://example.com/avatar_full.jpg",
+	}
+
+	out := renderString(t, ProfilePage(player))
+
+	// Page footer ('© 2026 softsrv')
+	if !strings.Contains(out, "© 2026 softsrv") {
+		t.Fatalf("missing Page footer in ProfilePage output: %s", out)
+	}
+
+	// Navbar (contains <nav and the navbar account menu rendering AvatarMedium)
+	if !strings.Contains(out, "<nav") {
+		t.Fatalf("missing navbar in ProfilePage output: %s", out)
+	}
+	if !strings.Contains(out, player.AvatarMedium) {
+		t.Fatalf("navbar should render AvatarMedium: %s", out)
+	}
+
+	// id="profile-header" element contains PersonaName and AvatarFull URL
+	profileHeaderRe := regexp.MustCompile(`(?s)<section[^>]*id="profile-header"[^>]*>(.*?)</section>`)
+	headerMatch := profileHeaderRe.FindStringSubmatch(out)
+	if headerMatch == nil {
+		t.Fatalf("missing id=\"profile-header\" section in ProfilePage: %s", out)
+	}
+	headerHTML := headerMatch[1]
+	if !strings.Contains(headerHTML, player.PersonaName) {
+		t.Fatalf("profile-header section does not contain player PersonaName %q: %s", player.PersonaName, headerHTML)
+	}
+	if !strings.Contains(headerHTML, player.AvatarFull) {
+		t.Fatalf("profile-header section does not contain player AvatarFull %q: %s", player.AvatarFull, headerHTML)
+	}
+
+	// element id="calendars" contains 'Calendars' heading
+	calendarsRe := regexp.MustCompile(`(?s)<section[^>]*id="calendars"[^>]*>(.*?)</section>`)
+	calendarsMatch := calendarsRe.FindStringSubmatch(out)
+	if calendarsMatch == nil {
+		t.Fatalf("missing id=\"calendars\" section in ProfilePage: %s", out)
+	}
+	calHTML := calendarsMatch[1]
+	if !strings.Contains(calHTML, "Calendars") {
+		t.Fatalf("calendars section does not contain 'Calendars' heading: %s", calHTML)
+	}
 }
