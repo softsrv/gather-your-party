@@ -1,9 +1,11 @@
 package component
 
 // Routes of the Google Calendar connection flow. The profile page links to
-// the connect path and posts a form to the disconnect path.
+// the connect path and posts a form to the disconnect path; Google redirects
+// back to the callback path.
 const (
 	GoogleCalendarConnectPath    = "/auth/google/calendar/connect"
+	GoogleCalendarCallbackPath   = "/auth/google/calendar/callback"
 	GoogleCalendarDisconnectPath = "/auth/google/calendar/disconnect"
 )
 
