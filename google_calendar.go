@@ -181,6 +181,24 @@ type googleTokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int64  `json:"expires_in"`
 	IDToken      string `json:"id_token"`
+	// Scope is the space-delimited set Google actually granted, which can be
+	// narrower than requested when the user unticks a scope on the consent
+	// screen.
+	Scope string `json:"scope"`
+}
+
+// googleCalendarReadScope is the grant a connection cannot work without.
+const googleCalendarReadScope = "https://www.googleapis.com/auth/calendar.readonly"
+
+// grantsGoogleCalendar reports whether a granted scope string includes
+// calendar read access.
+func grantsGoogleCalendar(scope string) bool {
+	for _, s := range strings.Fields(scope) {
+		if s == googleCalendarReadScope {
+			return true
+		}
+	}
+	return false
 }
 
 // exchangeGoogleCode trades an authorization code at the token endpoint. The
@@ -212,6 +230,18 @@ func (app *application) exchangeGoogleCode(ctx context.Context, code string) (db
 	}
 	if tokens.AccessToken == "" && tokens.RefreshToken == "" {
 		return db.GoogleCalendarConnection{}, errors.New("token response without tokens")
+	}
+	if !grantsGoogleCalendar(tokens.Scope) {
+		// A partial grant is no connection: hand the just-issued token back
+		// (best effort) and store nothing.
+		token := tokens.RefreshToken
+		if token == "" {
+			token = tokens.AccessToken
+		}
+		if err := revokeGoogleToken(ctx, token); err != nil {
+			fmt.Printf("google calendar revoke after partial grant (ignored): %s\n", err)
+		}
+		return db.GoogleCalendarConnection{}, errors.New("calendar scope not granted")
 	}
 	email, err := googleIDTokenEmail(tokens.IDToken)
 	if err != nil {

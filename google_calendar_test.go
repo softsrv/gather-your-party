@@ -204,6 +204,7 @@ func newFakeGoogle(t *testing.T) *fakeGoogle {
 		"expires_in":    3599,
 		"id_token":      idTokenWithEmail("player@example.com"),
 		"token_type":    "Bearer",
+		"scope":         "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.readonly",
 	}
 	oldToken, oldRevoke := googleTokenEndpoint, googleRevokeEndpoint
 	googleTokenEndpoint, googleRevokeEndpoint = g.token.URL, g.revoke.URL
@@ -654,6 +655,68 @@ func TestGoogleCalendarCallbackFailures(t *testing.T) {
 			t.Fatal("only calendar=error sets the failure message")
 		}
 	})
+}
+
+// A consent that grants sign-in but not calendar read access (the user
+// unticked it on Google's granular consent screen) is no connection: the
+// just-issued token is revoked, nothing is stored and the profile shows the
+// couldn't-connect message, never 'connected'.
+func TestGoogleCalendarCallbackRejectsPartialGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		refresh   bool
+		wantToken string
+	}{
+		{name: "refresh token revoked", refresh: true, wantToken: "SENTINEL-REFRESH-partial"},
+		{name: "access token revoked when no refresh", refresh: false, wantToken: "SENTINEL-ACCESS-partial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newCalendarStore(t)
+			g := newFakeGoogle(t)
+			g.tokenBody["scope"] = "openid email"
+			g.tokenBody["access_token"] = "SENTINEL-ACCESS-partial"
+			if tc.refresh {
+				g.tokenBody["refresh_token"] = "SENTINEL-REFRESH-partial"
+			} else {
+				delete(g.tokenBody, "refresh_token")
+			}
+			app := calendarApp(store, true)
+
+			state, stateCookie := startConnect(t, app, userAToken)
+			store.forbidSave = true
+			// The callback query's scope is not what Google uses to report
+			// grants; it must not rescue a partial token response.
+			w := serve(app, http.MethodGet, callbackURL(url.Values{"state": {state}, "code": {"auth-code-partial"}, "scope": {googleCalendarScope}}), sessionOf(userAToken), stateCookie)
+			if loc := w.Header().Get("Location"); loc != calendarErrorPath {
+				t.Fatalf("status %d Location %q, want %q", w.Code, loc, calendarErrorPath)
+			}
+			assertNoSentinel(t, "callback", w, "SENTINEL-ACCESS-partial", "SENTINEL-REFRESH-partial")
+			if got := store.writes(); len(got) != 0 {
+				t.Fatalf("store writes = %v", got)
+			}
+			if conn, ok := store.conn(userAID); ok {
+				t.Fatalf("connection stored: %+v", conn)
+			}
+			if g.revokeCount() != 1 || g.revokeForms[0].Get("token") != tc.wantToken {
+				t.Fatalf("revocation requests = %v, want one for %q", g.revokeForms, tc.wantToken)
+			}
+
+			page := serve(app, http.MethodGet, calendarErrorPath, sessionOf(userAToken))
+			body := page.Body.String()
+			if page.Code != http.StatusOK {
+				t.Fatalf("profile status = %d", page.Code)
+			}
+			if strings.Contains(body, "<span>connected</span>") {
+				t.Fatalf("partial grant must not show connected: %s", body)
+			}
+			if !strings.Contains(body, "not connected") {
+				t.Errorf("profile should show not connected: %s", body)
+			}
+			if !strings.Contains(body, "Couldn&#39;t connect Google Calendar") && !strings.Contains(body, "Couldn't connect Google Calendar") {
+				t.Errorf("profile missing couldn't-connect message: %s", body)
+			}
+		})
+	}
 }
 
 // CLM-8: without credentials the profile shows unavailable with no connect
