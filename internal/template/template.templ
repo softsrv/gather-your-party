@@ -93,7 +93,7 @@ templ PartiesPage(player steamapi.Player, parties []component.UserParty, invites
 	}
 }
 
-templ ProfilePage(player steamapi.Player) {
+templ ProfilePage(player steamapi.Player, cal component.CalendarState) {
 	@Page("Profile", component.NavState{Player: player, SignedIn: true, Active: "profile"}) {
 		<section id="profile-header" class="flex items-center gap-4">
 			@component.Avatar(player.AvatarFull, player.PersonaName, "h-16 w-16 text-xl")
@@ -103,8 +103,29 @@ templ ProfilePage(player steamapi.Player) {
 		</section>
 		<section id="calendars" class="space-y-4">
 			<h2 class="text-lg font-bold">Calendars</h2>
+			if cal.ConnectFailed {
+				<p role="alert" class="text-sm text-error">Couldn't connect Google Calendar. Please try again.</p>
+			}
 			<ul class="space-y-2">
-				<li class="text-sm text-base-content/60">No calendars connected</li>
+				<li class="flex items-center justify-between gap-3">
+					<span class="font-medium">Google Calendar</span>
+					if cal.Connected {
+						<span class="flex items-center gap-3 text-sm">
+							<span>connected</span>
+							<span class="text-base-content/60">{ cal.Email }</span>
+							<form method="post" action={ templ.SafeURL(component.GoogleCalendarDisconnectPath) }>
+								<button type="submit" class="btn btn-sm">Disconnect</button>
+							</form>
+						</span>
+					} else if !cal.GoogleAvailable {
+						<span class="text-sm text-base-content/60">unavailable</span>
+					} else {
+						<span class="flex items-center gap-3 text-sm">
+							<span class="text-base-content/60">not connected</span>
+							<a href={ templ.SafeURL(component.GoogleCalendarConnectPath) } class="btn btn-sm">Connect</a>
+						</span>
+					}
+				</li>
 			</ul>
 		</section>
 	}

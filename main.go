@@ -627,7 +627,7 @@ func (app *application) handleProfile(ctx *middleware.CustomContext, w http.Resp
 		}
 		return
 	}
-	if err := template.ProfilePage(player).Render(app.pageContext(ctx), w); err != nil {
+	if err := template.ProfilePage(player, component.CalendarState{}).Render(app.pageContext(ctx), w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
