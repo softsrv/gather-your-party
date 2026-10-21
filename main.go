@@ -601,6 +601,37 @@ func (app *application) sessionUserID(ctx *middleware.CustomContext, w http.Resp
 	return userID, true
 }
 
+func (app *application) handleProfile(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
+	steamID, ok := ctx.Value(middleware.SteamID{}).(string)
+	if !ok || steamID == "" {
+		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
+		return
+	}
+	_, found, err := app.store.ResolveUserID(r.Context(), steamID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		if err := template.ErrorPage("Gather Your Party", "unable to load your profile").Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
+	if !found {
+		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
+		return
+	}
+	player, found, err := app.store.UserProfile(r.Context(), steamID)
+	if err != nil || !found {
+		w.WriteHeader(http.StatusInternalServerError)
+		if err := template.ErrorPage("Gather Your Party", "unable to load your profile").Render(ctx, w); err != nil {
+			fmt.Printf("render error: %s\n", err)
+		}
+		return
+	}
+	if err := template.ProfilePage(player).Render(app.pageContext(ctx), w); err != nil {
+		fmt.Printf("render error: %s\n", err)
+	}
+}
+
 func (app *application) handleParties(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	userID, ok := app.sessionUserID(ctx, w, r)
 	if !ok {
@@ -1063,6 +1094,9 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("POST /auth/steam/logout", app.handleLogout)
 	mux.HandleFunc("GET /library/sync", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handleLibrarySync, auth.LoadSteamId)
+	})
+	mux.HandleFunc("GET /profile", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleProfile, auth.LoadSteamId)
 	})
 	mux.HandleFunc("GET /frag/friends", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.FriendsList, auth.LoadSteamId)
