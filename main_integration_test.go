@@ -63,7 +63,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 		t.Fatal("cannot configure scoped test pool")
 	}
 	defer pool.Close()
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql", "migrations/0006_google_calendar_connections.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -153,7 +153,7 @@ func inviteIntegrationStore(t *testing.T) (*db.Store, *pgxpool.Pool, context.Con
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql", "migrations/0006_google_calendar_connections.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

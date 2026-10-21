@@ -128,13 +128,13 @@ func TestMigrateSkipsAppliedFiles(t *testing.T) {
 		return result
 	}
 	before := applied()
-	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"} {
+	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0006_google_calendar_connections.sql"} {
 		if before[filename].IsZero() {
 			t.Fatalf("missing tracking row for %s", filename)
 		}
 	}
-	if len(before) != 5 {
-		t.Fatalf("applied %d migrations, want 5", len(before))
+	if len(before) != 6 {
+		t.Fatalf("applied %d migrations, want 6", len(before))
 	}
 	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
