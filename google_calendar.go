@@ -220,7 +220,7 @@ func (app *application) exchangeGoogleCode(ctx context.Context, code string) (db
 	if err != nil {
 		return db.GoogleCalendarConnection{}, errors.New("token exchange unreachable")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return db.GoogleCalendarConnection{}, fmt.Errorf("token exchange status %d", resp.StatusCode)
 	}
@@ -322,7 +322,7 @@ func revokeGoogleToken(ctx context.Context, token string) error {
 	if err != nil {
 		return errors.New("revoke unreachable")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("revoke status %d", resp.StatusCode)
