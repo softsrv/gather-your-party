@@ -6,8 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -71,6 +77,10 @@ func assertBootSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	if err := pool.QueryRow(ctx, "SELECT to_regclass('rejection_tallies') IS NOT NULL").Scan(&exists); err != nil || exists {
 		t.Fatalf("rejection_tallies exists = %v, error %v", exists, err)
 	}
+	var calendarNull bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('google_calendar_connections') IS NULL").Scan(&calendarNull); err != nil || !calendarNull {
+		t.Fatalf("google_calendar_connections is null = %v, error %v", calendarNull, err)
+	}
 }
 
 // CLM-9/10: real startup, with the observation made at the actual serve boundary.
@@ -99,33 +109,78 @@ func TestBootConnectsAndMigratesBeforeServing(t *testing.T) {
 	}
 }
 
-// Google Calendar CLM-8: the Google client credentials are optional. With
-// either one unset, startup still reaches serve and Google stays unavailable.
-func TestBootServesWithoutGoogleCredentials(t *testing.T) {
-	for _, setID := range []bool{false, true} {
-		t.Run(map[bool]string{false: "both unset", true: "secret unset"}[setID], func(t *testing.T) {
-			ctx, _ := bootIntegrationPool(t)
-			t.Chdir(t.TempDir())
-			t.Setenv("SESSION_SECRET", "boot-secret")
-			t.Setenv("APP_BASE_URL", "https://example.com")
-			unsetBootEnv(t, "GOOGLE_CLIENT_ID")
-			unsetBootEnv(t, "GOOGLE_CLIENT_SECRET")
-			if setID {
-				t.Setenv("GOOGLE_CLIENT_ID", "client-id")
-			}
-			served := false
-			stopped := errors.New("server stopped")
-			err := run(ctx, func(app *application) error {
-				served = true
-				if app.config.googleAvailable() {
-					t.Error("Google must be unavailable without both credentials")
-				}
-				return stopped
-			})
-			if !served || !errors.Is(err, stopped) {
-				t.Fatalf("served = %v, error %v", served, err)
-			}
+// Startup no longer reads any Google credential: with GOOGLE_* unset and with
+// junk values, boot reaches serve and GET / returns the same sign-in page.
+func TestBootIgnoresGoogleCredentials(t *testing.T) {
+	boot := func(t *testing.T, google map[string]string) (int, string) {
+		t.Helper()
+		ctx, _ := bootIntegrationPool(t)
+		t.Chdir(t.TempDir())
+		t.Setenv("SESSION_SECRET", "boot-secret")
+		t.Setenv("APP_BASE_URL", "https://example.com")
+		unsetBootEnv(t, "GOOGLE_CLIENT_ID")
+		unsetBootEnv(t, "GOOGLE_CLIENT_SECRET")
+		for key, value := range google {
+			t.Setenv(key, value)
+		}
+		var status int
+		var body string
+		stopped := errors.New("server stopped")
+		err := run(ctx, func(app *application) error {
+			w := httptest.NewRecorder()
+			app.routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
+			status, body = w.Code, w.Body.String()
+			return stopped
 		})
+		if !errors.Is(err, stopped) {
+			t.Fatalf("startup did not reach serve: %v", err)
+		}
+		return status, body
+	}
+	unsetStatus, unsetBody := boot(t, nil)
+	junkStatus, junkBody := boot(t, map[string]string{"GOOGLE_CLIENT_ID": "junk-id", "GOOGLE_CLIENT_SECRET": "junk-secret"})
+	if unsetStatus != http.StatusOK || junkStatus != unsetStatus {
+		t.Fatalf("GET / status unset=%d junk=%d, want both %d", unsetStatus, junkStatus, http.StatusOK)
+	}
+	if !strings.Contains(unsetBody, `href="/auth/steam"`) || junkBody != unsetBody {
+		t.Fatalf("GET / sign-in page differs or is missing:\nunset: %s\njunk: %s", unsetBody, junkBody)
+	}
+}
+
+// Removing Google Calendar: a brand-new database gets no
+// google_calendar_connections table, and schema_migrations records exactly the
+// embedded migrations/*.sql files.
+func TestMigrateFreshDatabaseHasNoGoogleCalendarTable(t *testing.T) {
+	ctx, pool := bootIntegrationPool(t)
+	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('google_calendar_connections') IS NOT NULL").Scan(&exists); err != nil || exists {
+		t.Fatalf("google_calendar_connections exists = %v, error %v", exists, err)
+	}
+	embedded, err := fs.Glob(migrationFiles, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, 0, len(embedded))
+	for _, path := range embedded {
+		want = append(want, strings.TrimPrefix(path, "migrations/"))
+	}
+	sort.Strings(want)
+	rows, err := pool.Query(ctx, "SELECT filename FROM schema_migrations ORDER BY filename")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(want) == 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema_migrations = %v, want embedded files %v", got, want)
+	}
+	if slices.Contains(got, "0006_google_calendar_connections.sql") {
+		t.Fatalf("0006 calendar migration still applied: %v", got)
 	}
 }
 
@@ -158,7 +213,7 @@ func TestMigrateSkipsAppliedFiles(t *testing.T) {
 		return result
 	}
 	before := applied()
-	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0006_google_calendar_connections.sql"} {
+	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0007_drop_google_calendar_connections.sql"} {
 		if before[filename].IsZero() {
 			t.Fatalf("missing tracking row for %s", filename)
 		}
@@ -341,5 +396,332 @@ func TestMigrateMarksExistingUsersLoggedIn(t *testing.T) {
 	}
 	if !before || after || state != "never_synced" || stateAt != nil {
 		t.Fatalf("pre-existing ever_logged_in=%v state=%q at=%v; new row ever_logged_in=%v", before, state, stateAt, after)
+	}
+}
+
+const original0006SQL = `CREATE TABLE google_calendar_connections (
+    user_id bigint PRIMARY KEY REFERENCES users(id),
+    email text NOT NULL,
+    refresh_token text NOT NULL DEFAULT '',
+    access_token text NOT NULL DEFAULT '',
+    token_expiry timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);`
+
+// CLM-1, CLM-3, CLM-4: start on a database that had 0001-0006 applied drops the
+// google_calendar_connections table and leaves all other data and schema objects untouched.
+func TestMigrateDropsGoogleCalendarConnections(t *testing.T) {
+	ctx, pool := bootIntegrationPool(t)
+
+	// Build an fstest.MapFS with 0001-0005 read from migrationFiles plus
+	// "migrations/0006_google_calendar_connections.sql" holding the original SQL.
+	initialFS := fstest.MapFS{
+		"migrations/0006_google_calendar_connections.sql": &fstest.MapFile{Data: []byte(original0006SQL)},
+	}
+	for _, name := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"} {
+		raw, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		initialFS["migrations/"+name] = &fstest.MapFile{Data: raw}
+	}
+	if err := migrate(ctx, pool, initialFS, "migrations"); err != nil {
+		t.Fatalf("initial migration failed: %v", err)
+	}
+
+	// Seed one row in each of users, sessions, parties, memberships, invites, games, user_games.
+	var userID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full) VALUES ('76561198000000001', 'Test User', 's.png', 'm.png', 'f.png') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions (token, user_id, expires_at) VALUES ('session-token-clm', $1, now() + interval '1 day')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	var partyID string
+	if err := pool.QueryRow(ctx, `INSERT INTO parties (name, leader_id) VALUES ('Test Party', $1) RETURNING id`, userID).Scan(&partyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id, user_id) VALUES ($1, $2)`, partyID, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO invites (party_id, user_id, inviter_id) VALUES ($1, $2, $2)`, partyID, userID); err != nil {
+		t.Fatal(err)
+	}
+	var gameID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO games (app_id, name) VALUES (440, 'Team Fortress 2') RETURNING id`).Scan(&gameID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_games (user_id, game_id) VALUES ($1, $2)`, userID, gameID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a google_calendar_connections row for the user with a non-empty email, refresh_token and access_token.
+	if _, err := pool.Exec(ctx, `INSERT INTO google_calendar_connections (user_id, email, refresh_token, access_token) VALUES ($1, 'test@example.com', 'rt-secret-123', 'at-secret-456')`, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture per-table row counts.
+	trackedTables := []string{"users", "sessions", "parties", "memberships", "invites", "games", "user_games"}
+	countsBefore := make(map[string]int)
+	for _, tbl := range trackedTables {
+		var c int
+		if err := pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", tbl)).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		countsBefore[tbl] = c
+	}
+
+	// Capture the full users row.
+	var userRowBefore string
+	if err := pool.QueryRow(ctx, "SELECT row_to_json(u)::text FROM users u WHERE id = $1", userID).Scan(&userRowBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture the table set from information_schema.tables WHERE table_schema = current_schema().
+	getTableSet := func() []string {
+		rows, err := pool.Query(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var tables []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			tables = append(tables, name)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return tables
+	}
+	tablesBefore := getTableSet()
+	if !slices.Contains(tablesBefore, "google_calendar_connections") {
+		t.Fatalf("expected google_calendar_connections in tablesBefore: %v", tablesBefore)
+	}
+
+	// Next start: run(ctx, serve) with SESSION_SECRET/APP_BASE_URL set and t.Chdir(t.TempDir()).
+	t.Chdir(t.TempDir())
+	t.Setenv("SESSION_SECRET", "boot-secret")
+	t.Setenv("APP_BASE_URL", "https://example.com")
+	served := false
+	stopped := errors.New("server stopped")
+	err := run(ctx, func(app *application) error {
+		served = true
+		return stopped
+	})
+	if !served || !errors.Is(err, stopped) {
+		t.Fatalf("start failed: served=%v, err=%v", served, err)
+	}
+
+	// 1. Start succeeded despite the 0006 row having no file (verified by served && err == stopped).
+	// Also check that the 0006 tracking row remains in schema_migrations.
+	var has0006 bool
+	if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = '0006_google_calendar_connections.sql')").Scan(&has0006); err != nil || !has0006 {
+		t.Fatalf("0006 row missing from schema_migrations: %v", err)
+	}
+
+	// 2. to_regclass('google_calendar_connections') IS NULL
+	var calendarNull bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('google_calendar_connections') IS NULL").Scan(&calendarNull); err != nil || !calendarNull {
+		t.Fatalf("google_calendar_connections is null = %v, err %v", calendarNull, err)
+	}
+
+	// 3. schema_migrations has a row for 0007_drop_google_calendar_connections.sql
+	var has0007 bool
+	if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = '0007_drop_google_calendar_connections.sql')").Scan(&has0007); err != nil || !has0007 {
+		t.Fatalf("schema_migrations missing 0007_drop_google_calendar_connections.sql: %v", err)
+	}
+
+	// 4. the counts and the users row are identical
+	countsAfter := make(map[string]int)
+	for _, tbl := range trackedTables {
+		var c int
+		if err := pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", tbl)).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		countsAfter[tbl] = c
+	}
+	if !reflect.DeepEqual(countsAfter, countsBefore) {
+		t.Fatalf("row counts changed: before %v, after %v", countsBefore, countsAfter)
+	}
+
+	var userRowAfter string
+	if err := pool.QueryRow(ctx, "SELECT row_to_json(u)::text FROM users u WHERE id = $1", userID).Scan(&userRowAfter); err != nil {
+		t.Fatal(err)
+	}
+	if userRowAfter != userRowBefore {
+		t.Fatalf("user row changed:\nbefore: %s\nafter:  %s", userRowBefore, userRowAfter)
+	}
+
+	// 5. the table set equals the before set minus google_calendar_connections
+	var wantTables []string
+	for _, tbl := range tablesBefore {
+		if tbl != "google_calendar_connections" {
+			wantTables = append(wantTables, tbl)
+		}
+	}
+	tablesAfter := getTableSet()
+	if !reflect.DeepEqual(tablesAfter, wantTables) {
+		t.Fatalf("table set after = %v, want %v", tablesAfter, wantTables)
+	}
+
+	// 6. no column named refresh_token, access_token or email exists in any table of current_schema() (information_schema.columns)
+	colRows, err := pool.Query(ctx, `SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = current_schema() AND column_name IN ('refresh_token', 'access_token', 'email')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var survivingCols []string
+	for colRows.Next() {
+		var col string
+		if err := colRows.Scan(&col); err != nil {
+			t.Fatal(err)
+		}
+		survivingCols = append(survivingCols, col)
+	}
+	colRows.Close()
+	if err := colRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(survivingCols) > 0 {
+		t.Fatalf("forbidden columns still exist: %v", survivingCols)
+	}
+
+	// 7. migrationFiles' 0007 content, with comment lines stripped, contains no "CASCADE" (case-insensitive) and is exactly one statement, `DROP TABLE IF EXISTS google_calendar_connections;`.
+	raw0007, err := migrationFiles.ReadFile("migrations/0007_drop_google_calendar_connections.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var strippedLines []string
+	for _, line := range strings.Split(string(raw0007), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		strippedLines = append(strippedLines, trimmed)
+	}
+	stripped0007 := strings.Join(strippedLines, " ")
+	if strings.Contains(strings.ToUpper(stripped0007), "CASCADE") {
+		t.Fatalf("0007 stripped content contains CASCADE: %s", stripped0007)
+	}
+	if strings.Contains(strings.ToUpper(string(raw0007)), "CASCADE") {
+		t.Fatalf("0007 raw content contains CASCADE: %s", string(raw0007))
+	}
+	if stripped0007 != "DROP TABLE IF EXISTS google_calendar_connections;" {
+		t.Fatalf("0007 stripped content = %q, want exactly 'DROP TABLE IF EXISTS google_calendar_connections;'", stripped0007)
+	}
+}
+
+// CLM-2b: migrating a database already at 0005 applies 0007 cleanly, records it in
+// schema_migrations, and leaves existing tables and rows completely unchanged.
+func TestMigrateFrom0005LeavesDataUnchanged(t *testing.T) {
+	ctx, pool := bootIntegrationPool(t)
+
+	// Migrate 0001-0005 only from a MapFS.
+	fs0005 := fstest.MapFS{}
+	for _, name := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"} {
+		raw, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs0005["migrations/"+name] = &fstest.MapFile{Data: raw}
+	}
+	if err := migrate(ctx, pool, fs0005, "migrations"); err != nil {
+		t.Fatalf("migrate 0001-0005 failed: %v", err)
+	}
+
+	// Seed users and sessions rows.
+	var userID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO users (steam_id_64, persona_name, avatar_small, avatar_medium, avatar_full) VALUES ('76561198000009201', 'User5', 's.png', 'm.png', 'f.png') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions (token, user_id, expires_at) VALUES ('session-token-0005', $1, now() + interval '1 day')`, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the row contents of users and sessions (row_to_json), the table set, and the schema_migrations filenames.
+	var userJSONBefore, sessionJSONBefore string
+	if err := pool.QueryRow(ctx, "SELECT row_to_json(u)::text FROM users u WHERE id = $1", userID).Scan(&userJSONBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT row_to_json(s)::text FROM sessions s WHERE token = 'session-token-0005'").Scan(&sessionJSONBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	getTableSet := func() []string {
+		rows, err := pool.Query(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var tables []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			tables = append(tables, name)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return tables
+	}
+	tablesBefore := getTableSet()
+
+	getMigrations := func() []string {
+		rows, err := pool.Query(ctx, "SELECT filename FROM schema_migrations ORDER BY filename")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var files []string
+		for rows.Next() {
+			var f string
+			if err := rows.Scan(&f); err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, f)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	migrationsBefore := getMigrations()
+
+	// Migrate with migrationFiles and assert it succeeds.
+	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
+		t.Fatalf("migrate with migrationFiles failed: %v", err)
+	}
+
+	// Assert the snapshots are unchanged, the table set is identical, and schema_migrations gained exactly one row, 0007_drop_google_calendar_connections.sql.
+	var userJSONAfter, sessionJSONAfter string
+	if err := pool.QueryRow(ctx, "SELECT row_to_json(u)::text FROM users u WHERE id = $1", userID).Scan(&userJSONAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT row_to_json(s)::text FROM sessions s WHERE token = 'session-token-0005'").Scan(&sessionJSONAfter); err != nil {
+		t.Fatal(err)
+	}
+	if userJSONAfter != userJSONBefore {
+		t.Fatalf("users row snapshot changed:\nbefore: %s\nafter:  %s", userJSONBefore, userJSONAfter)
+	}
+	if sessionJSONAfter != sessionJSONBefore {
+		t.Fatalf("sessions row snapshot changed:\nbefore: %s\nafter:  %s", sessionJSONBefore, sessionJSONAfter)
+	}
+
+	tablesAfter := getTableSet()
+	if !reflect.DeepEqual(tablesAfter, tablesBefore) {
+		t.Fatalf("table set changed: before %v, after %v", tablesBefore, tablesAfter)
+	}
+
+	migrationsAfter := getMigrations()
+	wantMigrations := append(slices.Clone(migrationsBefore), "0007_drop_google_calendar_connections.sql")
+	sort.Strings(wantMigrations)
+	if !reflect.DeepEqual(migrationsAfter, wantMigrations) {
+		t.Fatalf("schema_migrations = %v, want %v", migrationsAfter, wantMigrations)
 	}
 }

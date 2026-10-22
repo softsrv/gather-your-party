@@ -83,45 +83,41 @@ func TestLibrarySyncStatus(t *testing.T) {
 	}
 }
 
-func TestNavbarProfileMenuItem(t *testing.T) {
-	render := func(nav NavState) string {
-		var buf bytes.Buffer
-		if err := Navbar(nav).Render(context.Background(), &buf); err != nil {
-			t.Fatalf("render failed: %v", err)
-		}
-		return buf.String()
+// The signed-in account menu has no Profile entry; the parties link and the
+// sign-out form still render as they did before the calendar change.
+func TestNavbarAccountMenuHasNoProfileLink(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Navbar(NavState{SignedIn: true}).Render(context.Background(), &buf); err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+	signedIn := buf.String()
+
+	dropdownAt := strings.Index(signedIn, `class="menu dropdown-content`)
+	if dropdownAt == -1 {
+		t.Fatalf("signed-in navbar missing account menu: %s", signedIn)
+	}
+	menu := signedIn[dropdownAt:]
+	if end := strings.Index(menu, "</ul>"); end != -1 {
+		menu = menu[:end]
 	}
 
-	signedIn := render(NavState{SignedIn: true})
-	wantProfileLink := `<a href="/profile">Profile</a>`
-	if !strings.Contains(signedIn, wantProfileLink) {
-		t.Errorf("signed-in navbar missing %q: %s", wantProfileLink, signedIn)
+	if strings.Contains(signedIn, "/profile") {
+		t.Errorf("signed-in navbar still links to /profile: %s", signedIn)
+	}
+	if strings.Contains(signedIn, ">Profile<") {
+		t.Errorf("signed-in navbar still has a Profile label: %s", signedIn)
 	}
 
-	wantLogoutForm := `<form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form>`
-	if !strings.Contains(signedIn, wantLogoutForm) {
-		t.Errorf("signed-in navbar missing logout form markup %q: %s", wantLogoutForm, signedIn)
+	wantLogoutForm := `<li role="none"><form action="/auth/steam/logout" method="post"><button type="submit">log out</button></form></li>`
+	if !strings.Contains(menu, wantLogoutForm) {
+		t.Errorf("account menu missing sign-out form %q: %s", wantLogoutForm, menu)
+	}
+	if n := strings.Count(menu, "<li"); n != 1 {
+		t.Errorf("account menu should hold only the sign-out entry, got %d entries: %s", n, menu)
 	}
 
-	// Assert that Profile link is inside dropdown-content ul before the logout form
-	dropdownIdx := strings.Index(signedIn, `class="menu dropdown-content`)
-	if dropdownIdx == -1 {
-		t.Fatalf("signed-in navbar missing dropdown-content: %s", signedIn)
-	}
-	profileIdx := strings.Index(signedIn[dropdownIdx:], wantProfileLink)
-	if profileIdx == -1 {
-		t.Errorf("profile link not inside dropdown-content: %s", signedIn)
-	}
-	logoutIdx := strings.Index(signedIn[dropdownIdx:], wantLogoutForm)
-	if logoutIdx == -1 {
-		t.Errorf("logout form not inside dropdown-content: %s", signedIn)
-	}
-	if profileIdx >= logoutIdx {
-		t.Errorf("expected profile link before logout form in dropdown-content: %s", signedIn)
-	}
-
-	signedOut := render(NavState{SignedIn: false})
-	if strings.Contains(signedOut, `href="/profile"`) {
-		t.Errorf("signed-out navbar unexpectedly contains href=\"/profile\": %s", signedOut)
+	wantPartiesLink := `<a href="/parties" class="`
+	if !strings.Contains(signedIn, wantPartiesLink) || !strings.Contains(signedIn, "Parties</a>") {
+		t.Errorf("signed-in navbar missing the parties link: %s", signedIn)
 	}
 }

@@ -63,7 +63,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 		t.Fatal("cannot configure scoped test pool")
 	}
 	defer pool.Close()
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql", "migrations/0006_google_calendar_connections.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -153,7 +153,7 @@ func inviteIntegrationStore(t *testing.T) (*db.Store, *pgxpool.Pool, context.Con
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql", "migrations/0006_google_calendar_connections.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -762,163 +762,4 @@ func TestLoginSyncFriendsAndOwnLibraryOnly(t *testing.T) {
 	if games, err := f.store.UserGames(f.ctx, testSteamID); err != nil || len(games) != 1 {
 		t.Fatalf("user library=%v err=%v", games, err)
 	}
-}
-
-// Integration tests for GET /profile: CLM-1, CLM-2, CLM-3, CLM-5
-func TestProfileIntegrationRoutes(t *testing.T) {
-	store, _, ctx := inviteIntegrationStore(t)
-	config := appConfig{SessionSecret: "profile-integration-secret"}
-	app := application{
-		store:  store,
-		config: config,
-		steam:  func() view.SteamService { return &fakeSteamRouteService{} },
-	}
-	router := app.routes()
-
-	cookieFor := func(userID int64) *http.Cookie {
-		t.Helper()
-		token, err := store.CreateSession(ctx, userID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mac := hmac.New(sha256.New, []byte(config.SessionSecret))
-		mac.Write([]byte(token))
-		return &http.Cookie{Name: "session", Value: token + "." + hex.EncodeToString(mac.Sum(nil))}
-	}
-
-	userA := steamapi.Player{
-		PersonaName:  "Alyx Vance",
-		AvatarMedium: "https://example.com/alyx_medium.jpg",
-		AvatarFull:   "https://example.com/alyx_full.jpg",
-	}
-	userAID, err := store.UpsertUser(ctx, "76561198000000801", userA)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	userB := steamapi.Player{
-		PersonaName:  "Barney Calhoun",
-		AvatarMedium: "https://example.com/barney_medium.jpg",
-		AvatarFull:   "https://example.com/barney_full.jpg",
-	}
-	userBID, err := store.UpsertUser(ctx, "76561198000000802", userB)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cookieA := cookieFor(userAID)
-	_ = userBID
-
-	// (a) CLM-1: Seed user with distinct AvatarMedium and AvatarFull.
-	// Assert 200, 'Account menu', Page footer, and that #profile-header contains
-	// PersonaName and AvatarFull URL.
-	t.Run("CLM-1: Valid session renders profile page chrome and header", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/profile", nil).WithContext(ctx)
-		req.AddCookie(cookieA)
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d want %d body = %s", w.Code, http.StatusOK, w.Body.String())
-		}
-		body := w.Body.String()
-		if !strings.Contains(body, `aria-label="Account menu"`) {
-			t.Errorf("missing Account menu: %s", body)
-		}
-		if !strings.Contains(body, "© 2026 softsrv") || !strings.Contains(body, "Gather Your Party · Not affiliated with Valve") {
-			t.Errorf("missing footer: %s", body)
-		}
-		headerIdx := strings.Index(body, `id="profile-header"`)
-		if headerIdx == -1 {
-			t.Fatalf("missing id=\"profile-header\": %s", body)
-		}
-		headerSection := body[headerIdx:]
-		if endSection := strings.Index(headerSection, "</section>"); endSection != -1 {
-			headerSection = headerSection[:endSection]
-		}
-		if !strings.Contains(headerSection, userA.PersonaName) {
-			t.Errorf("header missing persona name %q: %s", userA.PersonaName, headerSection)
-		}
-		if !strings.Contains(headerSection, userA.AvatarFull) {
-			t.Errorf("header missing avatar full URL %q: %s", userA.AvatarFull, headerSection)
-		}
-	})
-
-	// (b) CLM-2: Seed users A and B, request /profile?steamid=<B>&user=<B id> with A's cookie.
-	// A's name is shown; B's name and avatar URLs are absent.
-	t.Run("CLM-2: Query parameters cannot hijack profile identity", func(t *testing.T) {
-		path := fmt.Sprintf("/profile?steamid=%s&user=%d", "76561198000000802", userBID)
-		req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
-		req.AddCookie(cookieA)
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d want %d body = %s", w.Code, http.StatusOK, w.Body.String())
-		}
-		body := w.Body.String()
-		if !strings.Contains(body, userA.PersonaName) {
-			t.Errorf("body missing user A PersonaName: %s", body)
-		}
-		if strings.Contains(body, userB.PersonaName) {
-			t.Errorf("body contains user B PersonaName %q: %s", userB.PersonaName, body)
-		}
-		if strings.Contains(body, userB.AvatarFull) || strings.Contains(body, userB.AvatarMedium) {
-			t.Errorf("body contains user B avatar URLs: %s", body)
-		}
-	})
-
-	// (c) CLM-3: No cookie, then forged/unknown session cookie.
-	// Assert 401, body equal to sessionUserID error text, no Profile title or id="calendars".
-	t.Run("CLM-3: Unauthenticated or forged cookie returns 401 with sign-in text", func(t *testing.T) {
-		for _, tc := range []struct {
-			name   string
-			cookie *http.Cookie
-		}{
-			{name: "no cookie", cookie: nil},
-			{name: "forged cookie", cookie: &http.Cookie{Name: "session", Value: "forged.mac"}},
-			{name: "unknown token", cookie: &http.Cookie{Name: "session", Value: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.dummy"}},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				req := httptest.NewRequest(http.MethodGet, "/profile", nil).WithContext(ctx)
-				if tc.cookie != nil {
-					req.AddCookie(tc.cookie)
-				}
-				w := httptest.NewRecorder()
-				router.ServeHTTP(w, req)
-
-				if w.Code != http.StatusUnauthorized {
-					t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
-				}
-				body := strings.TrimSpace(w.Body.String())
-				if body != "sign in to manage parties" {
-					t.Fatalf("body = %q, want %q", body, "sign in to manage parties")
-				}
-				if strings.Contains(w.Body.String(), "<title>Profile</title>") {
-					t.Errorf("body contains Profile title: %s", w.Body.String())
-				}
-				if strings.Contains(w.Body.String(), `id="calendars"`) {
-					t.Errorf("body contains calendars section: %s", w.Body.String())
-				}
-			})
-		}
-	})
-
-	// (d) CLM-5: Signed-in GET / and GET /parties return 200 and contain href="/profile".
-	t.Run("CLM-5: Signed-in GET / and GET /parties link to /profile", func(t *testing.T) {
-		for _, p := range []string{"/", "/parties"} {
-			req := httptest.NewRequest(http.MethodGet, p, nil).WithContext(ctx)
-			req.AddCookie(cookieA)
-			w := httptest.NewRecorder()
-			router.ServeHTTP(w, req)
-
-			if w.Code != http.StatusOK {
-				t.Fatalf("path %s status = %d want %d", p, w.Code, http.StatusOK)
-			}
-			body := w.Body.String()
-			if !strings.Contains(body, `href="/profile"`) {
-				t.Errorf("path %s missing href=\"/profile\": %s", p, body)
-			}
-		}
-	})
 }

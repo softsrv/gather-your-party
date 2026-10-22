@@ -35,18 +35,9 @@ import (
 var steamOpenIDEndpoint = "https://steamcommunity.com/openid/login"
 
 // appConfig holds settings for session security and the public OpenID origin.
-// The Google client credentials are optional: without both, Google Calendar
-// connect is shown as unavailable.
 type appConfig struct {
-	SessionSecret      string
-	AppBaseURL         string
-	GoogleClientID     string
-	GoogleClientSecret string
-}
-
-// googleAvailable reports whether both Google client credentials are set.
-func (c appConfig) googleAvailable() bool {
-	return c.GoogleClientID != "" && c.GoogleClientSecret != ""
+	SessionSecret string
+	AppBaseURL    string
 }
 
 type sessionStore interface {
@@ -68,9 +59,6 @@ type sessionStore interface {
 	AcceptInvite(context.Context, string, int64) error
 	RejectInvite(context.Context, string, int64) error
 	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
-	SaveGoogleCalendarConnection(context.Context, int64, db.GoogleCalendarConnection) error
-	GoogleCalendarConnection(context.Context, int64) (db.GoogleCalendarConnection, bool, error)
-	DeleteGoogleCalendarConnection(context.Context, int64) (db.GoogleCalendarConnection, bool, error)
 	view.SharedGamesListStore
 }
 
@@ -135,9 +123,6 @@ func run(ctx context.Context, serve func(*application) error) error {
 	config := appConfig{
 		SessionSecret: os.Getenv("SESSION_SECRET"),
 		AppBaseURL:    os.Getenv("APP_BASE_URL"),
-		// Optional: either one unset leaves Google Calendar unavailable.
-		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 	}
 	// Without these, Steam rejects the OpenID return_to ("invalid return protocol")
 	// or the callback silently refuses every sign-in.
@@ -616,56 +601,6 @@ func (app *application) sessionUserID(ctx *middleware.CustomContext, w http.Resp
 	return userID, true
 }
 
-func (app *application) handleProfile(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
-	steamID, ok := ctx.Value(middleware.SteamID{}).(string)
-	if !ok || steamID == "" {
-		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
-		return
-	}
-	userID, found, err := app.store.ResolveUserID(r.Context(), steamID)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		if err := template.ErrorPage("Gather Your Party", "unable to load your profile").Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	if !found {
-		http.Error(w, "sign in to manage parties", http.StatusUnauthorized)
-		return
-	}
-	player, found, err := app.store.UserProfile(r.Context(), steamID)
-	if err != nil || !found {
-		w.WriteHeader(http.StatusInternalServerError)
-		if err := template.ErrorPage("Gather Your Party", "unable to load your profile").Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	// The stored connection decides the state whatever the Google config, so a
-	// connected user can still see and remove it when credentials are unset.
-	conn, connected, err := app.store.GoogleCalendarConnection(r.Context(), userID)
-	if err != nil {
-		fmt.Printf("google calendar connection lookup: %s\n", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		if err := template.ErrorPage("Gather Your Party", "unable to load your profile").Render(ctx, w); err != nil {
-			fmt.Printf("render error: %s\n", err)
-		}
-		return
-	}
-	cal := component.CalendarState{
-		GoogleAvailable: app.config.googleAvailable(),
-		Connected:       connected,
-		ConnectFailed:   r.URL.Query().Get(calendarQueryKey) == calendarQueryError,
-	}
-	if connected {
-		cal.Email = conn.Email
-	}
-	if err := template.ProfilePage(player, cal).Render(app.pageContext(ctx), w); err != nil {
-		fmt.Printf("render error: %s\n", err)
-	}
-}
-
 func (app *application) handleParties(ctx *middleware.CustomContext, w http.ResponseWriter, r *http.Request) {
 	userID, ok := app.sessionUserID(ctx, w, r)
 	if !ok {
@@ -1128,18 +1063,6 @@ func (app *application) routes() http.Handler {
 	mux.HandleFunc("POST /auth/steam/logout", app.handleLogout)
 	mux.HandleFunc("GET /library/sync", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handleLibrarySync, auth.LoadSteamId)
-	})
-	mux.HandleFunc("GET /profile", func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, app.handleProfile, auth.LoadSteamId)
-	})
-	mux.HandleFunc("GET "+component.GoogleCalendarConnectPath, func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, app.handleGoogleCalendarConnect, auth.LoadSteamId)
-	})
-	mux.HandleFunc("GET "+component.GoogleCalendarCallbackPath, func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, app.handleGoogleCalendarCallback, auth.LoadSteamId)
-	})
-	mux.HandleFunc("POST "+component.GoogleCalendarDisconnectPath, func(w http.ResponseWriter, r *http.Request) {
-		middleware.Chain(w, r, app.handleGoogleCalendarDisconnect, auth.LoadSteamId)
 	})
 	mux.HandleFunc("GET /frag/friends", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, view.FriendsList, auth.LoadSteamId)
