@@ -118,7 +118,16 @@ templ PartyDetail(player steamapi.Player, partyID string, partyName string, memb
 		</div>
 		<div class="grid items-start gap-6 lg:grid-cols-[1fr_22rem]">
 			<div class="grid gap-6">
-				@component.PartyRoster(members)
+				<div role="tablist" class="tabs tabs-border">
+					<input type="radio" name="party-tabs" id="party-members-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Members" aria-controls="party-members-panel" checked/>
+					<section id="party-members-panel" role="tabpanel" aria-labelledby="party-members-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6">
+						@component.PartyRoster(members)
+					</section>
+					<input type="radio" name="party-tabs" id="party-events-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Events" aria-controls="party-events-panel"/>
+					<section id="party-events-panel" role="tabpanel" aria-labelledby="party-events-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6">
+						@component.PartyEvents(partyID, events, isLeader, len(members) == 1, sharedGames, gamesMessages)
+					</section>
+				</div>
 				<section aria-label="Shared games" class="space-y-4">
 					<h2 class="text-lg font-bold">Shared games</h2>
 					if len(members) == 1 {
@@ -129,7 +138,6 @@ templ PartyDetail(player steamapi.Player, partyID string, partyName string, memb
 						@component.SharedGamesWithCounts(sharedGames)
 					}
 				</section>
-				@component.PartyEvents(partyID, events, isLeader, len(members) == 1, sharedGames, gamesMessages)
 			</div>
 			<div class="grid gap-6">
 				if isLeader {

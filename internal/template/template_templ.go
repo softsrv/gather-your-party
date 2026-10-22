@@ -399,7 +399,7 @@ func PartyDetail(player steamapi.Player, partyID string, partyName string, membe
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</div></div><div class=\"grid items-start gap-6 lg:grid-cols-[1fr_22rem]\"><div class=\"grid gap-6\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</div></div><div class=\"grid items-start gap-6 lg:grid-cols-[1fr_22rem]\"><div class=\"grid gap-6\"><div role=\"tablist\" class=\"tabs tabs-border\"><input type=\"radio\" name=\"party-tabs\" id=\"party-members-tab\" role=\"tab\" class=\"tab whitespace-nowrap font-medium\" aria-label=\"Members\" aria-controls=\"party-members-panel\" checked><section id=\"party-members-panel\" role=\"tabpanel\" aria-labelledby=\"party-members-tab\" class=\"tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -407,12 +407,20 @@ func PartyDetail(player steamapi.Player, partyID string, partyName string, membe
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "<section aria-label=\"Shared games\" class=\"space-y-4\"><h2 class=\"text-lg font-bold\">Shared games</h2>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</section><input type=\"radio\" name=\"party-tabs\" id=\"party-events-tab\" role=\"tab\" class=\"tab whitespace-nowrap font-medium\" aria-label=\"Events\" aria-controls=\"party-events-panel\"><section id=\"party-events-panel\" role=\"tabpanel\" aria-labelledby=\"party-events-tab\" class=\"tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = component.PartyEvents(partyID, events, isLeader, len(members) == 1, sharedGames, gamesMessages).Render(ctx, templ_7745c5c3_Buffer)
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</section></div><section aria-label=\"Shared games\" class=\"space-y-4\"><h2 class=\"text-lg font-bold\">Shared games</h2>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if len(members) == 1 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "<p class=\"text-sm text-base-content/60\">Invite someone to your party to see the games you have in common.</p>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "<p class=\"text-sm text-base-content/60\">Invite someone to your party to see the games you have in common.</p>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
@@ -427,15 +435,7 @@ func PartyDetail(player steamapi.Player, partyID string, partyName string, membe
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "</section>")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = component.PartyEvents(partyID, events, isLeader, len(members) == 1, sharedGames, gamesMessages).Render(ctx, templ_7745c5c3_Buffer)
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</div><div class=\"grid gap-6\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</section></div><div class=\"grid gap-6\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

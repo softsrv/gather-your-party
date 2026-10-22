@@ -359,3 +359,216 @@ func TestOnlyBaseEmitsDocumentShell(t *testing.T) {
 		}
 	})
 }
+
+func extractElementByID(body, id, tag string) string {
+	openPattern := regexp.MustCompile(`<` + tag + `[^>]*\bid="` + regexp.QuoteMeta(id) + `"[^>]*>`)
+	loc := openPattern.FindStringIndex(body)
+	if loc == nil {
+		return ""
+	}
+	start := loc[0]
+	endTag := "</" + tag + ">"
+	endIdx := strings.Index(body[start:], endTag)
+	if endIdx == -1 {
+		return ""
+	}
+	return body[start : start+endIdx+len(endTag)]
+}
+
+// CLM-1, CLM-2, CLM-3, CLM-4, CLM-5: PartyDetail tabs structure and content isolation
+func TestPartyDetailTabs(t *testing.T) {
+	player := steamapi.Player{SteamID: "76561198000000001", PersonaName: "Leader"}
+	leaderMember := component.PartyMember{Name: "LeaderPerson", IsLeader: true}
+	otherMember := component.PartyMember{Name: "OtherPerson", IsLeader: false}
+	twoMembers := []component.PartyMember{leaderMember, otherMember}
+	games := []component.SharedGameCount{{Game: steamapi.Game{AppID: 10, Name: "Counter-Strike"}}}
+	inviteCandidates := []component.InviteCandidate{{SteamID: "76561198000000003", Name: "CandidateFriend"}}
+	stepDownCandidates := []component.StepDownCandidate{{UserID: 2, Name: "OtherPerson"}}
+
+	// CLM-1 & CLM-3: Structure, radio attributes, and exact DaisyUI classes
+	t.Run("tablist structure and classes (CLM-1, CLM-3)", func(t *testing.T) {
+		body := renderString(t, PartyDetail(player, "party-123", "Test Party", twoMembers, true, inviteCandidates, stepDownCandidates, games, nil, nil))
+
+		const wantTablist = `<div role="tablist" class="tabs tabs-border">`
+		if strings.Count(body, wantTablist) != 1 {
+			t.Fatalf("expected exactly one tablist %q, got count %d", wantTablist, strings.Count(body, wantTablist))
+		}
+
+		tablistStart := strings.Index(body, wantTablist)
+		if tablistStart == -1 {
+			t.Fatalf("could not find tablist div: %s", wantTablist)
+		}
+		// The tablist div closes with </div> right before <section aria-label="Shared games"
+		sharedGamesStart := strings.Index(body[tablistStart:], `<section aria-label="Shared games"`)
+		if sharedGamesStart == -1 {
+			t.Fatalf("could not find shared games section after tablist")
+		}
+		tablistContent := body[tablistStart : tablistStart+sharedGamesStart]
+
+		for _, want := range []string{
+			`type="radio" name="party-tabs" id="party-members-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Members" aria-controls="party-members-panel" checked`,
+			`id="party-members-panel" role="tabpanel" aria-labelledby="party-members-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6"`,
+			`type="radio" name="party-tabs" id="party-events-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Events" aria-controls="party-events-panel"`,
+			`id="party-events-panel" role="tabpanel" aria-labelledby="party-events-tab" class="tab-content rounded-box border-base-300 bg-base-100 p-4 sm:p-6"`,
+		} {
+			if !strings.Contains(tablistContent, want) {
+				t.Errorf("tablist missing expected substring: %s", want)
+			}
+		}
+
+		if strings.Contains(tablistContent, "parties-tabs") {
+			t.Errorf("party tabs must not use radio name 'parties-tabs'")
+		}
+
+		if strings.Contains(tablistContent, `id="party-events-tab" role="tab" class="tab whitespace-nowrap font-medium" aria-label="Events" aria-controls="party-events-panel" checked`) {
+			t.Errorf("events tab radio should not be checked")
+		}
+
+		// Check that each tab-content section immediately follows its radio input
+		membersRadioIdx := strings.Index(tablistContent, `id="party-members-tab"`)
+		membersPanelIdx := strings.Index(tablistContent, `id="party-members-panel"`)
+		eventsRadioIdx := strings.Index(tablistContent, `id="party-events-tab"`)
+		eventsPanelIdx := strings.Index(tablistContent, `id="party-events-panel"`)
+
+		if membersRadioIdx == -1 || membersPanelIdx == -1 || eventsRadioIdx == -1 || eventsPanelIdx == -1 {
+			t.Fatalf("missing radio or panel elements in tablist")
+		}
+		if !(membersRadioIdx < membersPanelIdx && membersPanelIdx < eventsRadioIdx && eventsRadioIdx < eventsPanelIdx) {
+			t.Fatalf("ordering mismatch: expected members radio < members panel < events radio < events panel")
+		}
+
+		// Check members appear inside members panel
+		membersPanel := extractElementByID(body, "party-members-panel", "section")
+		if !strings.Contains(membersPanel, "LeaderPerson") || !strings.Contains(membersPanel, "OtherPerson") {
+			t.Errorf("members panel missing member names: %s", membersPanel)
+		}
+	})
+
+	// CLM-2: Content isolation between Members and Events panels across leader/non-leader x 1/0 events
+	t.Run("content isolation (CLM-2)", func(t *testing.T) {
+		oneEvent := []component.PartyEvent{{
+			GameName: "Counter-Strike",
+		}}
+
+		cases := []struct {
+			name     string
+			isLeader bool
+			events   []component.PartyEvent
+		}{
+			{name: "leader with one event", isLeader: true, events: oneEvent},
+			{name: "leader with zero events", isLeader: true, events: nil},
+			{name: "non-leader with one event", isLeader: false, events: oneEvent},
+			{name: "non-leader with zero events", isLeader: false, events: nil},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				body := renderString(t, PartyDetail(player, "party-123", "Test Party", twoMembers, tc.isLeader, inviteCandidates, stepDownCandidates, games, nil, tc.events))
+
+				membersPanel := extractElementByID(body, "party-members-panel", "section")
+				eventsPanel := extractElementByID(body, "party-events-panel", "section")
+
+				if membersPanel == "" {
+					t.Fatalf("could not extract members panel")
+				}
+				if eventsPanel == "" {
+					t.Fatalf("could not extract events panel")
+				}
+
+				// Events panel content
+				if len(tc.events) > 0 {
+					if !strings.Contains(eventsPanel, "Counter-Strike") {
+						t.Errorf("events panel missing event game name")
+					}
+				} else {
+					if !strings.Contains(eventsPanel, "No events scheduled") {
+						t.Errorf("events panel missing 'No events scheduled' empty state")
+					}
+				}
+
+				const createFormAction = `action="/parties/party-123/events"`
+				if tc.isLeader {
+					if !strings.Contains(eventsPanel, createFormAction) {
+						t.Errorf("leader events panel missing create event form")
+					}
+				} else {
+					if strings.Contains(eventsPanel, createFormAction) {
+						t.Errorf("non-leader events panel contains create event form")
+					}
+				}
+
+				// No member name in Events panel
+				if strings.Contains(eventsPanel, "LeaderPerson") || strings.Contains(eventsPanel, "OtherPerson") {
+					t.Errorf("events panel contains member names")
+				}
+
+				// No event content in Members panel
+				if strings.Contains(membersPanel, "No events scheduled") || strings.Contains(membersPanel, "Counter-Strike") || strings.Contains(membersPanel, createFormAction) {
+					t.Errorf("members panel contains event content")
+				}
+			})
+		}
+	})
+
+	// CLM-4: Shared games, invite picker, step-down control, leave link outside tablist
+	t.Run("elements outside tablist (CLM-4)", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			isLeader bool
+		}{
+			{name: "leader", isLeader: true},
+			{name: "non-leader", isLeader: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				body := renderString(t, PartyDetail(player, "party-123", "Test Party", twoMembers, tc.isLeader, inviteCandidates, stepDownCandidates, games, nil, nil))
+
+				const wantTablist = `<div role="tablist" class="tabs tabs-border">`
+				tablistStart := strings.Index(body, wantTablist)
+				if tablistStart == -1 {
+					t.Fatalf("missing tablist")
+				}
+				sharedGamesStart := strings.Index(body[tablistStart:], `<section aria-label="Shared games"`)
+				if sharedGamesStart == -1 {
+					t.Fatalf("missing shared games section after tablist")
+				}
+				tablistSpan := body[tablistStart : tablistStart+sharedGamesStart]
+
+				// Shared games section must be present and outside tablist
+				const sharedGamesAttr = `aria-label="Shared games"`
+				if !strings.Contains(body, sharedGamesAttr) {
+					t.Fatalf("missing shared games section in page")
+				}
+				if strings.Contains(tablistSpan, sharedGamesAttr) {
+					t.Errorf("shared games section must not be inside tablist")
+				}
+
+				// Leave link must be present and outside tablist
+				const leaveLink = `href="/parties/party-123/leave"`
+				if !strings.Contains(body, leaveLink) {
+					t.Fatalf("missing leave link in page")
+				}
+				if strings.Contains(tablistSpan, leaveLink) {
+					t.Errorf("leave link must not be inside tablist")
+				}
+
+				// Invite and step-down controls for leader
+				const inviteAction = `action="/parties/party-123/invites/send"`
+				const stepDownAction = `action="/parties/party-123/step-down"`
+				if tc.isLeader {
+					if !strings.Contains(body, inviteAction) {
+						t.Errorf("leader page missing invite action")
+					}
+					if strings.Contains(tablistSpan, inviteAction) {
+						t.Errorf("invite form must not be inside tablist")
+					}
+					if !strings.Contains(body, stepDownAction) {
+						t.Errorf("leader page missing step-down action")
+					}
+					if strings.Contains(tablistSpan, stepDownAction) {
+						t.Errorf("step-down form must not be inside tablist")
+					}
+				}
+			})
+		}
+	})
+}
