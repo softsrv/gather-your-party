@@ -44,7 +44,7 @@ func TestPersistence(t *testing.T) {
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		if _, err := pool.Exec(cleanupCtx, "DROP TABLE google_calendar_connections, user_games, games, invites, memberships, parties, sessions, users"); err != nil {
+		if _, err := pool.Exec(cleanupCtx, "DROP TABLE user_games, games, invites, memberships, parties, sessions, users"); err != nil {
 			t.Errorf("cleanup: %v", err)
 		}
 	}()

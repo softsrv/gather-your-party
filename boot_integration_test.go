@@ -6,8 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -99,33 +105,78 @@ func TestBootConnectsAndMigratesBeforeServing(t *testing.T) {
 	}
 }
 
-// Google Calendar CLM-8: the Google client credentials are optional. With
-// either one unset, startup still reaches serve and Google stays unavailable.
-func TestBootServesWithoutGoogleCredentials(t *testing.T) {
-	for _, setID := range []bool{false, true} {
-		t.Run(map[bool]string{false: "both unset", true: "secret unset"}[setID], func(t *testing.T) {
-			ctx, _ := bootIntegrationPool(t)
-			t.Chdir(t.TempDir())
-			t.Setenv("SESSION_SECRET", "boot-secret")
-			t.Setenv("APP_BASE_URL", "https://example.com")
-			unsetBootEnv(t, "GOOGLE_CLIENT_ID")
-			unsetBootEnv(t, "GOOGLE_CLIENT_SECRET")
-			if setID {
-				t.Setenv("GOOGLE_CLIENT_ID", "client-id")
-			}
-			served := false
-			stopped := errors.New("server stopped")
-			err := run(ctx, func(app *application) error {
-				served = true
-				if app.config.googleAvailable() {
-					t.Error("Google must be unavailable without both credentials")
-				}
-				return stopped
-			})
-			if !served || !errors.Is(err, stopped) {
-				t.Fatalf("served = %v, error %v", served, err)
-			}
+// Startup no longer reads any Google credential: with GOOGLE_* unset and with
+// junk values, boot reaches serve and GET / returns the same sign-in page.
+func TestBootIgnoresGoogleCredentials(t *testing.T) {
+	boot := func(t *testing.T, google map[string]string) (int, string) {
+		t.Helper()
+		ctx, _ := bootIntegrationPool(t)
+		t.Chdir(t.TempDir())
+		t.Setenv("SESSION_SECRET", "boot-secret")
+		t.Setenv("APP_BASE_URL", "https://example.com")
+		unsetBootEnv(t, "GOOGLE_CLIENT_ID")
+		unsetBootEnv(t, "GOOGLE_CLIENT_SECRET")
+		for key, value := range google {
+			t.Setenv(key, value)
+		}
+		var status int
+		var body string
+		stopped := errors.New("server stopped")
+		err := run(ctx, func(app *application) error {
+			w := httptest.NewRecorder()
+			app.routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
+			status, body = w.Code, w.Body.String()
+			return stopped
 		})
+		if !errors.Is(err, stopped) {
+			t.Fatalf("startup did not reach serve: %v", err)
+		}
+		return status, body
+	}
+	unsetStatus, unsetBody := boot(t, nil)
+	junkStatus, junkBody := boot(t, map[string]string{"GOOGLE_CLIENT_ID": "junk-id", "GOOGLE_CLIENT_SECRET": "junk-secret"})
+	if unsetStatus != http.StatusOK || junkStatus != unsetStatus {
+		t.Fatalf("GET / status unset=%d junk=%d, want both %d", unsetStatus, junkStatus, http.StatusOK)
+	}
+	if !strings.Contains(unsetBody, `href="/auth/steam"`) || junkBody != unsetBody {
+		t.Fatalf("GET / sign-in page differs or is missing:\nunset: %s\njunk: %s", unsetBody, junkBody)
+	}
+}
+
+// Removing Google Calendar: a brand-new database gets no
+// google_calendar_connections table, and schema_migrations records exactly the
+// embedded migrations/*.sql files.
+func TestMigrateFreshDatabaseHasNoGoogleCalendarTable(t *testing.T) {
+	ctx, pool := bootIntegrationPool(t)
+	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('google_calendar_connections') IS NOT NULL").Scan(&exists); err != nil || exists {
+		t.Fatalf("google_calendar_connections exists = %v, error %v", exists, err)
+	}
+	embedded, err := fs.Glob(migrationFiles, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, 0, len(embedded))
+	for _, path := range embedded {
+		want = append(want, strings.TrimPrefix(path, "migrations/"))
+	}
+	sort.Strings(want)
+	rows, err := pool.Query(ctx, "SELECT filename FROM schema_migrations ORDER BY filename")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(want) == 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema_migrations = %v, want embedded files %v", got, want)
+	}
+	if slices.Contains(got, "0006_google_calendar_connections.sql") {
+		t.Fatalf("0006 calendar migration still applied: %v", got)
 	}
 }
 
@@ -158,13 +209,13 @@ func TestMigrateSkipsAppliedFiles(t *testing.T) {
 		return result
 	}
 	before := applied()
-	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0006_google_calendar_connections.sql"} {
+	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"} {
 		if before[filename].IsZero() {
 			t.Fatalf("missing tracking row for %s", filename)
 		}
 	}
-	if len(before) != 6 {
-		t.Fatalf("applied %d migrations, want 6", len(before))
+	if len(before) != 5 {
+		t.Fatalf("applied %d migrations, want 5", len(before))
 	}
 	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
