@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,22 @@ type partyDetailStore struct {
 	sharedErr       error
 	sharedStoredErr error
 	sharedCalls     int
+	// events is what UpcomingPartyEvents returns; eventsErr makes it fail.
+	events      []db.PartyEvent
+	eventsErr   error
+	eventsCalls int
+	// createEventCalls counts CreatePartyEvent calls.
+	createEventCalls int
+}
+
+func (s *partyDetailStore) UpcomingPartyEvents(context.Context, string, time.Time) ([]db.PartyEvent, error) {
+	s.eventsCalls++
+	return s.events, s.eventsErr
+}
+
+func (s *partyDetailStore) CreatePartyEvent(context.Context, string, int, time.Time, time.Time) error {
+	s.createEventCalls++
+	return nil
 }
 
 func (s *partyDetailStore) GameSyncStates(ctx context.Context, ids []string) (map[string]db.GameSyncState, error) {
@@ -319,6 +336,85 @@ func TestPartyDetailSharedGamesFailureLeaderControls(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "private store failure details") {
 		t.Fatalf("underlying error was not recorded server-side: stdout=%s", stdout)
+	}
+	// CLM-6: the create-event form shows the message in place of the picker and
+	// offers no enabled submit.
+	formStart := strings.Index(body, `action="/parties/`+testPartyID+`/events"`)
+	if formStart < 0 {
+		t.Fatalf("leader page lacks the create-event form: %s", body)
+	}
+	form := body[formStart : formStart+strings.Index(body[formStart:], "</form>")]
+	if !strings.Contains(form, sharedGamesUnavailableMessage) {
+		t.Fatalf("create-event form lacks the shared-games message: %s", form)
+	}
+	if strings.Contains(form, "<select") || strings.Contains(form, "<option") {
+		t.Fatalf("create-event form offers a game picker: %s", form)
+	}
+	for _, button := range regexp.MustCompile(`<button[^>]*type="submit"[^>]*>`).FindAllString(form, -1) {
+		if !strings.Contains(button, " disabled") {
+			t.Fatalf("create-event form offers an enabled submit: %s", form)
+		}
+	}
+}
+
+// CLM-6: a create POST made while shared games cannot be built answers with
+// the message and never reaches CreatePartyEvent.
+func TestCreatePartyEventSharedGamesFailureSavesNothing(t *testing.T) {
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected Steam endpoint: %s", r.URL.Path)
+		return nil, errors.New("unexpected Steam endpoint")
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+	store := &partyDetailStore{
+		leaveStore: leaveStore{found: true},
+		member:     true, leader: true,
+		sharedStoredErr: errors.New("private store failure details"),
+	}
+	store.syncedGames = []db.StoredGame{{AppID: 10, Name: "Stored", DataFetched: true, HasData: true, Multiplayer: true}}
+	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+	w := httptest.NewRecorder()
+	form := "game_app_id=10&date=2030-01-02&start_time=19:00&end_time=21:00&utc_offset=%2B00:00"
+	stdout := captureStdout(t, func() {
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodPost, "/parties/"+testPartyID+"/events", form, true))
+	})
+	body := w.Body.String()
+	if store.createEventCalls != 0 {
+		t.Fatalf("CreatePartyEvent called %d times while shared games failed", store.createEventCalls)
+	}
+	if w.Code < 400 || !strings.Contains(body, sharedGamesUnavailableMessage) || strings.Contains(body, "private store failure details") {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+	if store.sharedCalls == 0 || !strings.Contains(stdout, "private store failure details") {
+		t.Fatalf("shared games were not built or the error was not recorded: calls=%d stdout=%s", store.sharedCalls, stdout)
+	}
+}
+
+// CLM-9: a failed events load answers 500, as a roster failure does, and never
+// renders the page with an empty event list.
+func TestPartyDetailEventsLoadFailure(t *testing.T) {
+	mockEmptyPartyLibraries(t)
+	store := &partyDetailStore{
+		leaveStore: leaveStore{found: true},
+		member:     true, leader: true,
+		eventsErr: errors.New("private database details"),
+	}
+	app := application{store: store, config: appConfig{SessionSecret: "leave-test-secret"}}
+	w := httptest.NewRecorder()
+	captureStdout(t, func() {
+		app.routes().ServeHTTP(w, leaveRequest(http.MethodGet, "/parties/"+testPartyID, "", true))
+	})
+	body := w.Body.String()
+	if w.Code != http.StatusInternalServerError || store.eventsCalls != 1 {
+		t.Fatalf("status=%d events loads=%d body=%s", w.Code, store.eventsCalls, body)
+	}
+	for _, forbidden := range []string{"<title>Party details</title>", "Private Alyx", "No events scheduled", "private database details"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("events failure body contains %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "unable to load party events") {
+		t.Fatalf("events failure body lacks its reason: %s", body)
 	}
 }
 

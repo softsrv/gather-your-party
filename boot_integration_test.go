@@ -67,7 +67,7 @@ func bootIntegrationPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 
 func assertBootSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	for _, table := range []string{"users", "sessions", "parties", "memberships", "invites", "games", "user_games", "schema_migrations"} {
+	for _, table := range []string{"users", "sessions", "parties", "memberships", "invites", "games", "user_games", "party_events", "schema_migrations"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", table).Scan(&exists); err != nil || !exists {
 			t.Fatalf("table %s exists = %v, error %v", table, exists, err)
@@ -213,13 +213,13 @@ func TestMigrateSkipsAppliedFiles(t *testing.T) {
 		return result
 	}
 	before := applied()
-	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0007_drop_google_calendar_connections.sql"} {
+	for _, filename := range []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0007_drop_google_calendar_connections.sql", "0008_party_events.sql"} {
 		if before[filename].IsZero() {
 			t.Fatalf("missing tracking row for %s", filename)
 		}
 	}
-	if len(before) != 6 {
-		t.Fatalf("applied %d migrations, want 6", len(before))
+	if len(before) != 7 {
+		t.Fatalf("applied %d migrations, want 7", len(before))
 	}
 	if err := migrate(ctx, pool, migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
@@ -557,13 +557,16 @@ func TestMigrateDropsGoogleCalendarConnections(t *testing.T) {
 		t.Fatalf("user row changed:\nbefore: %s\nafter:  %s", userRowBefore, userRowAfter)
 	}
 
-	// 5. the table set equals the before set minus google_calendar_connections
+	// 5. the table set equals the before set minus google_calendar_connections,
+	// plus party_events from migration 0008.
 	var wantTables []string
 	for _, tbl := range tablesBefore {
 		if tbl != "google_calendar_connections" {
 			wantTables = append(wantTables, tbl)
 		}
 	}
+	wantTables = append(wantTables, "party_events")
+	sort.Strings(wantTables)
 	tablesAfter := getTableSet()
 	if !reflect.DeepEqual(tablesAfter, wantTables) {
 		t.Fatalf("table set after = %v, want %v", tablesAfter, wantTables)
@@ -698,7 +701,7 @@ func TestMigrateFrom0005LeavesDataUnchanged(t *testing.T) {
 		t.Fatalf("migrate with migrationFiles failed: %v", err)
 	}
 
-	// Assert the snapshots are unchanged, the table set is identical, and schema_migrations gained exactly one row, 0007_drop_google_calendar_connections.sql.
+	// Assert the snapshots are unchanged, the table set gained exactly party_events, and schema_migrations gained exactly two rows, 0007_drop_google_calendar_connections.sql and 0008_party_events.sql.
 	var userJSONAfter, sessionJSONAfter string
 	if err := pool.QueryRow(ctx, "SELECT row_to_json(u)::text FROM users u WHERE id = $1", userID).Scan(&userJSONAfter); err != nil {
 		t.Fatal(err)
@@ -714,12 +717,14 @@ func TestMigrateFrom0005LeavesDataUnchanged(t *testing.T) {
 	}
 
 	tablesAfter := getTableSet()
-	if !reflect.DeepEqual(tablesAfter, tablesBefore) {
-		t.Fatalf("table set changed: before %v, after %v", tablesBefore, tablesAfter)
+	wantTables := append(slices.Clone(tablesBefore), "party_events")
+	sort.Strings(wantTables)
+	if !reflect.DeepEqual(tablesAfter, wantTables) {
+		t.Fatalf("table set after = %v, want %v (before %v)", tablesAfter, wantTables, tablesBefore)
 	}
 
 	migrationsAfter := getMigrations()
-	wantMigrations := append(slices.Clone(migrationsBefore), "0007_drop_google_calendar_connections.sql")
+	wantMigrations := append(slices.Clone(migrationsBefore), "0007_drop_google_calendar_connections.sql", "0008_party_events.sql")
 	sort.Strings(wantMigrations)
 	if !reflect.DeepEqual(migrationsAfter, wantMigrations) {
 		t.Fatalf("schema_migrations = %v, want %v", migrationsAfter, wantMigrations)

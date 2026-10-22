@@ -63,7 +63,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 		t.Fatal("cannot configure scoped test pool")
 	}
 	defer pool.Close()
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql", "migrations/0007_drop_google_calendar_connections.sql", "migrations/0008_party_events.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -153,7 +153,7 @@ func inviteIntegrationStore(t *testing.T) (*db.Store, *pgxpool.Pool, context.Con
 		t.Fatal("cannot configure scoped test pool")
 	}
 	t.Cleanup(pool.Close)
-	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql"} {
+	for _, path := range []string{"migrations/0001_init.sql", "migrations/0002_parties.sql", "migrations/0003_drop_rejection_tallies.sql", "migrations/0004_games.sql", "migrations/0005_library_sync.sql", "migrations/0007_drop_google_calendar_connections.sql", "migrations/0008_party_events.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -761,5 +761,248 @@ func TestLoginSyncFriendsAndOwnLibraryOnly(t *testing.T) {
 	}
 	if games, err := f.store.UserGames(f.ctx, testSteamID); err != nil || len(games) != 1 {
 		t.Fatalf("user library=%v err=%v", games, err)
+	}
+}
+
+// partyEventsFixture is a two-member party whose members share one stored
+// multiplayer game (app 10, "Common Alpha"); app 20 is owned by the leader
+// only. An outsider is signed in too but belongs to no party.
+type partyEventsFixture struct {
+	store                        *db.Store
+	pool                         *pgxpool.Pool
+	ctx                          context.Context
+	router                       http.Handler
+	party                        string
+	leader, member, outsider     *http.Cookie
+	leaderUserID, outsiderUserID int64
+}
+
+func newPartyEventsFixture(t *testing.T) *partyEventsFixture {
+	t.Helper()
+	store, pool, ctx := inviteIntegrationStore(t)
+	f := &partyEventsFixture{store: store, pool: pool, ctx: ctx}
+	steamIDs := []string{"76561198000000701", "76561198000000702", "76561198000000703"}
+	names := []string{"Leader Alyx", "Member Gordon", "Outsider Barney"}
+	users := make([]int64, len(steamIDs))
+	for i, id := range steamIDs {
+		var err error
+		if users[i], err = store.UpsertUser(ctx, id, steamapi.Player{PersonaName: names[i]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.leaderUserID, f.outsiderUserID = users[0], users[2]
+	party, err := store.CreateParty(ctx, users[0], "Events party")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.party = party
+	if _, err := pool.Exec(ctx, `INSERT INTO memberships (party_id,user_id) VALUES ($1,$2)`, party, users[1]); err != nil {
+		t.Fatal(err)
+	}
+	alpha, leaderOnly := steamapi.Game{AppID: 10, Name: "Common Alpha"}, steamapi.Game{AppID: 20, Name: "Leader Only"}
+	if err := store.StoreUserLibrary(ctx, users[0], []steamapi.Game{alpha, leaderOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreUserLibrary(ctx, users[1], []steamapi.Game{alpha}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreGameData(ctx, []db.GameData{{AppID: 10, HasData: true, Multiplayer: true}, {AppID: 20, HasData: true, Multiplayer: true}}); err != nil {
+		t.Fatal(err)
+	}
+	steam := &endToEndFakeSteam{}
+	app := application{store: store, config: appConfig{SessionSecret: "party-events-secret"}, steam: func() view.SteamService { return steam }}
+	f.router = app.routes()
+	cookie := func(userID int64) *http.Cookie {
+		token, err := store.CreateSession(ctx, userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mac := hmac.New(sha256.New, []byte(app.config.SessionSecret))
+		mac.Write([]byte(token))
+		return &http.Cookie{Name: "session", Value: token + "." + hex.EncodeToString(mac.Sum(nil))}
+	}
+	f.leader, f.member, f.outsider = cookie(users[0]), cookie(users[1]), cookie(users[2])
+	return f
+}
+
+func (f *partyEventsFixture) post(t *testing.T, cookie *http.Cookie, form string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/parties/"+f.party+"/events", strings.NewReader(form)).WithContext(f.ctx)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, r)
+	return w
+}
+
+func (f *partyEventsFixture) page(t *testing.T, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/parties/"+f.party, nil).WithContext(f.ctx)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, r)
+	return w
+}
+
+func (f *partyEventsFixture) eventCount(t *testing.T) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM party_events WHERE party_id = $1`, f.party).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// validEventForm is a fully valid create-event form for 2030-01-02 19:00–21:30.
+func validEventForm(offset string) string {
+	return "game_app_id=10&date=2030-01-02&start_time=19:00&end_time=21:30&utc_offset=" + strings.ReplaceAll(offset, "+", "%2B")
+}
+
+const eventFormMarker = `<form method="post" action="/parties/`
+
+// CLM-1, CLM-2, CLM-17: the leader's valid POST saves one row for the party,
+// and every member's next page shows its date, range and stored game name; the
+// create form is the leader's only; a client game_name never shows.
+func TestCreatePartyEventLeaderEndToEnd(t *testing.T) {
+	f := newPartyEventsFixture(t)
+	w := f.post(t, f.leader, validEventForm("+00:00")+"&game_name=Bogus+Client+Name")
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/parties/"+f.party {
+		t.Fatalf("create status=%d location=%q body=%s", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	var partyID string
+	var appID int
+	var startAt, endAt time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT e.party_id::text, g.app_id, e.start_at, e.end_at FROM party_events e JOIN games g ON g.id = e.game_id`).Scan(&partyID, &appID, &startAt, &endAt); err != nil {
+		t.Fatalf("want exactly one saved event: %v", err)
+	}
+	if partyID != f.party || appID != 10 || !startAt.Equal(time.Date(2030, 1, 2, 19, 0, 0, 0, time.UTC)) || !endAt.Equal(time.Date(2030, 1, 2, 21, 30, 0, 0, time.UTC)) {
+		t.Fatalf("saved party=%s app=%d start=%s end=%s", partyID, appID, startAt.UTC(), endAt.UTC())
+	}
+	if n := f.eventCount(t); n != 1 {
+		t.Fatalf("party_events=%d want 1", n)
+	}
+	eventMarkup := []string{
+		"Common Alpha",
+		`<time datetime="2030-01-02T19:00:00Z"`, "Wed, 2 Jan 2030 19:00 UTC",
+		`<time datetime="2030-01-02T21:30:00Z"`, "21:30 UTC",
+	}
+	for _, viewer := range []struct {
+		name     string
+		cookie   *http.Cookie
+		isLeader bool
+	}{{"leader", f.leader, true}, {"member", f.member, false}} {
+		page := f.page(t, viewer.cookie)
+		body := page.Body.String()
+		if page.Code != http.StatusOK {
+			t.Fatalf("%s page status=%d body=%s", viewer.name, page.Code, body)
+		}
+		events := body[strings.Index(body, `aria-label="Party events"`):]
+		for _, want := range eventMarkup {
+			if !strings.Contains(events, want) {
+				t.Errorf("%s page lacks %q: %s", viewer.name, want, events)
+			}
+		}
+		if strings.Contains(events, "No events scheduled") {
+			t.Errorf("%s page shows the empty state beside an event", viewer.name)
+		}
+		if strings.Contains(body, "Bogus Client Name") {
+			t.Errorf("%s page shows the client-supplied game name", viewer.name)
+		}
+		if got := strings.Contains(body, eventFormMarker+f.party+`/events"`); got != viewer.isLeader {
+			t.Errorf("%s page create form present=%v want %v", viewer.name, got, viewer.isLeader)
+		}
+	}
+}
+
+// CLM-3: a non-leader member's fully valid POST saves nothing and is sent back
+// to the party page, as a refused invite is.
+func TestCreatePartyEventNonLeaderSavesNothing(t *testing.T) {
+	f := newPartyEventsFixture(t)
+	w := f.post(t, f.member, validEventForm("+00:00"))
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/parties/"+f.party {
+		t.Fatalf("status=%d location=%q body=%s", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	if n := f.eventCount(t); n != 0 {
+		t.Fatalf("non-leader POST saved %d events", n)
+	}
+}
+
+// CLM-4: an outsider gets 403 "party members only" on the page with none of
+// its events, and their valid POST saves nothing.
+func TestPartyEventsOutsiderRefused(t *testing.T) {
+	f := newPartyEventsFixture(t)
+	if err := f.store.CreatePartyEvent(f.ctx, f.party, 10, time.Now().Add(time.Hour), time.Now().Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	page := f.page(t, f.outsider)
+	if page.Code != http.StatusForbidden || !strings.Contains(page.Body.String(), "party members only") || strings.Contains(page.Body.String(), "Common Alpha") {
+		t.Fatalf("outsider page status=%d body=%s", page.Code, page.Body.String())
+	}
+	w := f.post(t, f.outsider, validEventForm("+00:00"))
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "party members only") {
+		t.Fatalf("outsider POST status=%d body=%s", w.Code, w.Body.String())
+	}
+	if n := f.eventCount(t); n != 1 {
+		t.Fatalf("outsider POST changed party_events to %d", n)
+	}
+	// The member still sees the event the outsider could not.
+	if body := f.page(t, f.member).Body.String(); !strings.Contains(body, "Common Alpha") {
+		t.Fatalf("member page lacks the event: %s", body)
+	}
+}
+
+// CLM-5: each invalid leader POST saves nothing and names the problem.
+func TestCreatePartyEventValidation(t *testing.T) {
+	f := newPartyEventsFixture(t)
+	for _, tc := range []struct {
+		name, form, reason string
+	}{
+		{"end equals start", "game_app_id=10&date=2030-01-02&start_time=19:00&end_time=19:00&utc_offset=%2B00:00", "end must be after the start"},
+		{"end before start", "game_app_id=10&date=2030-01-02&start_time=19:00&end_time=18:00&utc_offset=%2B00:00", "end must be after the start"},
+		{"missing date", "game_app_id=10&start_time=19:00&end_time=21:00&utc_offset=%2B00:00", "date is required"},
+		{"garbage start time", "game_app_id=10&date=2030-01-02&start_time=soon&end_time=21:00&utc_offset=%2B00:00", "start time must be a valid HH:MM time"},
+		{"missing end time", "game_app_id=10&date=2030-01-02&start_time=19:00&utc_offset=%2B00:00", "end time is required"},
+		{"missing offset", "game_app_id=10&date=2030-01-02&start_time=19:00&end_time=21:00", "UTC offset is required"},
+		{"garbage offset", "game_app_id=10&date=2030-01-02&start_time=19:00&end_time=21:00&utc_offset=EST", "UTC offset must look like +HH:MM or -HH:MM"},
+		{"app owned by one member", "game_app_id=20&date=2030-01-02&start_time=19:00&end_time=21:00&utc_offset=%2B00:00", "game is not in the party's shared games"},
+		{"non-numeric app ID", "game_app_id=alpha&date=2030-01-02&start_time=19:00&end_time=21:00&utc_offset=%2B00:00", "game must be one of the party's shared games"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := f.post(t, f.leader, tc.form)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.reason) {
+				t.Fatalf("status=%d body=%q want 400 with %q", w.Code, w.Body.String(), tc.reason)
+			}
+			if n := f.eventCount(t); n != 0 {
+				t.Fatalf("invalid POST saved %d events", n)
+			}
+		})
+	}
+}
+
+// CLM-10: the same wall-clock entry at UTC and at UTC-05:00 stores instants
+// exactly five hours apart, each the expected UTC instant.
+func TestCreatePartyEventOffsetsGiveAbsoluteInstants(t *testing.T) {
+	f := newPartyEventsFixture(t)
+	for _, offset := range []string{"+00:00", "-05:00"} {
+		if w := f.post(t, f.leader, validEventForm(offset)); w.Code != http.StatusSeeOther {
+			t.Fatalf("offset %s status=%d body=%s", offset, w.Code, w.Body.String())
+		}
+	}
+	rows, err := f.pool.Query(f.ctx, `SELECT start_at FROM party_events WHERE party_id = $1 ORDER BY start_at`, f.party)
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts, err := pgx.CollectRows(rows, pgx.RowTo[time.Time])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 2 {
+		t.Fatalf("starts=%v want 2", starts)
+	}
+	if !starts[0].Equal(time.Date(2030, 1, 2, 19, 0, 0, 0, time.UTC)) || !starts[1].Equal(time.Date(2030, 1, 3, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("starts=%s,%s", starts[0].UTC(), starts[1].UTC())
+	}
+	if diff := starts[1].Sub(starts[0]); diff != 5*time.Hour {
+		t.Fatalf("instants differ by %s, want 5h", diff)
 	}
 }

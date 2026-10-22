@@ -1,0 +1,183 @@
+package component
+
+import (
+	"strconv"
+	"time"
+)
+
+// PartyEvent is one scheduled party event as the party page shows it.
+// StartAt and EndAt are absolute instants.
+type PartyEvent struct {
+	GameName string
+	StartAt  time.Time
+	EndAt    time.Time
+}
+
+const (
+	// NoEventGamesSoloMessage explains why a solo party cannot schedule an event.
+	NoEventGamesSoloMessage = "Invite someone to your party to schedule an event for a game you all own."
+	// NoEventGamesInCommonMessage explains why a party without shared multiplayer games cannot schedule an event.
+	NoEventGamesInCommonMessage = "Your party has no multiplayer games in common to schedule."
+	// NoEventGamesMembersMessage explains why a party with a private or unsynced
+	// member cannot schedule an event; the Shared games section names them.
+	NoEventGamesMembersMessage = "Some members have private or unsynced game lists, so there are no shared games to schedule. Shared games above names them."
+	// sharedGamesUncomputable heads the per-member messages BuildSharedGames returns.
+	sharedGamesUncomputable = "Shared games cannot be computed."
+)
+
+// membersBlockSharedGames reports whether the shared-games messages are the
+// per-member ones (private or unsynced libraries), which the Shared games
+// section already lists; the form then gives a one-line reason instead of
+// repeating them.
+func membersBlockSharedGames(messages []string) bool {
+	return len(messages) > 0 && messages[0] == sharedGamesUncomputable
+}
+
+// eventInstant is the machine-readable UTC form of an event time.
+func eventInstant(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
+
+// eventStartText is the UTC fallback text for an event's start, shown until the
+// page script rewrites it in the viewer's time zone.
+func eventStartText(t time.Time) string {
+	return t.UTC().Format("Mon, 2 Jan 2006 15:04 UTC")
+}
+
+// eventEndText is the UTC fallback text for an event's end; the date is
+// repeated only when the end falls on another UTC day than the start.
+func eventEndText(start, end time.Time) string {
+	s, e := start.UTC(), end.UTC()
+	if s.Year() == e.Year() && s.YearDay() == e.YearDay() {
+		return e.Format("15:04 UTC")
+	}
+	return e.Format("Mon, 2 Jan 2006 15:04 UTC")
+}
+
+func eventEndKind(start, end time.Time) string {
+	s, e := start.UTC(), end.UTC()
+	if s.Year() == e.Year() && s.YearDay() == e.YearDay() {
+		return "time"
+	}
+	return "datetime"
+}
+
+// PartyEvents is the party's upcoming events ("No events scheduled" when there
+// are none) and, for the leader only, the create-event form.
+templ PartyEvents(partyID string, events []PartyEvent, isLeader bool, solo bool, games []SharedGameCount, gamesMessages []string) {
+	<section aria-label="Party events" id="party-events" class="space-y-4">
+		<h2 class="text-lg font-bold">Events</h2>
+		if len(events) == 0 {
+			<p class="text-sm text-base-content/60">No events scheduled</p>
+		} else {
+			<ul class="space-y-2">
+				for _, event := range events {
+					<li class="party-event rounded-xl border border-white/5 bg-base-200/70 p-3">
+						<p class="font-medium">{ event.GameName }</p>
+						<p class="text-sm text-base-content/70">
+							<time datetime={ eventInstant(event.StartAt) } data-local-time="datetime">{ eventStartText(event.StartAt) }</time>
+							–
+							<time datetime={ eventInstant(event.EndAt) } data-local-time={ eventEndKind(event.StartAt, event.EndAt) }>{ eventEndText(event.StartAt, event.EndAt) }</time>
+						</p>
+					</li>
+				}
+			</ul>
+		}
+		if isLeader {
+			@PartyEventForm(partyID, solo, games, gamesMessages)
+		}
+		@partyEventsScript()
+	</section>
+}
+
+// PartyEventForm posts a new event for the party. With no game to pick it shows
+// why in place of the picker and offers only a disabled submit.
+templ PartyEventForm(partyID string, solo bool, games []SharedGameCount, gamesMessages []string) {
+	<form method="post" action={ templ.SafeURL("/parties/" + partyID + "/events") } class="party-event-form grid gap-3 rounded-xl border border-white/5 bg-base-200/70 p-4">
+		<h3 class="font-bold">Schedule an event</h3>
+		if solo {
+			<p class="text-sm text-base-content/60">{ NoEventGamesSoloMessage }</p>
+			<button type="submit" class="btn btn-primary btn-sm" disabled>Schedule event</button>
+		} else if len(gamesMessages) > 0 && membersBlockSharedGames(gamesMessages) {
+			<p class="text-sm text-base-content/60">{ NoEventGamesMembersMessage }</p>
+			<button type="submit" class="btn btn-primary btn-sm" disabled>Schedule event</button>
+		} else if len(gamesMessages) > 0 {
+			@ErrorMessages(gamesMessages)
+			<button type="submit" class="btn btn-primary btn-sm" disabled>Schedule event</button>
+		} else if len(games) == 0 {
+			<p class="text-sm text-base-content/60">{ NoEventGamesInCommonMessage }</p>
+			<button type="submit" class="btn btn-primary btn-sm" disabled>Schedule event</button>
+		} else {
+			<label class="form-control">
+				<span class="label-text">Game</span>
+				<select name="game_app_id" class="select select-bordered select-sm" required>
+					for _, entry := range games {
+						<option value={ strconv.Itoa(entry.Game.AppID) }>{ entry.Game.Name }</option>
+					}
+				</select>
+			</label>
+			<label class="form-control">
+				<span class="label-text">Date</span>
+				<input type="date" name="date" class="input input-bordered input-sm" required/>
+			</label>
+			<div class="grid grid-cols-2 gap-3">
+				<label class="form-control">
+					<span class="label-text">Start</span>
+					<input type="time" name="start_time" class="input input-bordered input-sm" required/>
+				</label>
+				<label class="form-control">
+					<span class="label-text">End</span>
+					<input type="time" name="end_time" class="input input-bordered input-sm" required/>
+				</label>
+			</div>
+			<input type="hidden" name="utc_offset" value="" data-utc-offset/>
+			<button type="submit" class="btn btn-primary btn-sm">Schedule event</button>
+		}
+	</form>
+}
+
+// partyEventsScript shows each <time datetime> in the viewer's time zone and
+// fills the form's utc_offset as "+HH:MM"/"-HH:MM" east of UTC, the format the
+// create-event handler parses.
+templ partyEventsScript() {
+	<script>
+	(function () {
+		function formatOffset(minutesWest) {
+			var east = -minutesWest;
+			var abs = Math.abs(east);
+			return (east < 0 ? "-" : "+") + String(Math.floor(abs / 60)).padStart(2, "0") + ":" + String(abs % 60).padStart(2, "0");
+		}
+		function localize() {
+			document.querySelectorAll("time[data-local-time]").forEach(function (el) {
+				var d = new Date(el.getAttribute("datetime"));
+				if (isNaN(d.getTime())) { return; }
+				var opts = el.getAttribute("data-local-time") === "time"
+					? { hour: "numeric", minute: "2-digit" }
+					: { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" };
+				el.textContent = d.toLocaleString(undefined, opts);
+			});
+			var offset = formatOffset(new Date().getTimezoneOffset());
+			document.querySelectorAll("input[data-utc-offset]").forEach(function (el) {
+				el.value = offset;
+				var form = el.form;
+				if (!form || form.dataset.offsetBound) { return; }
+				form.dataset.offsetBound = "1";
+				// Use the offset in force on the chosen day, so a date across a
+				// daylight-saving change is converted with its own offset.
+				form.addEventListener("submit", function () {
+					var date = form.elements["date"], start = form.elements["start_time"];
+					if (!date || !start || !date.value || !start.value) { return; }
+					var p = date.value.split("-"), t = start.value.split(":");
+					var local = new Date(+p[0], +p[1] - 1, +p[2], +t[0], +t[1]);
+					if (!isNaN(local.getTime())) { el.value = formatOffset(local.getTimezoneOffset()); }
+				});
+			});
+		}
+		if (document.readyState === "loading") {
+			document.addEventListener("DOMContentLoaded", localize);
+		} else {
+			localize();
+		}
+	})();
+	</script>
+}
