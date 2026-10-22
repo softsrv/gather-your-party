@@ -59,6 +59,8 @@ type sessionStore interface {
 	AcceptInvite(context.Context, string, int64) error
 	RejectInvite(context.Context, string, int64) error
 	InviteCandidates(context.Context, string, int64, []string) ([]db.InviteCandidate, error)
+	CreatePartyEvent(ctx context.Context, partyID string, appID int, startAt, endAt time.Time) error
+	UpcomingPartyEvents(ctx context.Context, partyID string, now time.Time) ([]db.PartyEvent, error)
 	view.SharedGamesListStore
 }
 
@@ -696,6 +698,16 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 		http.Error(w, "unable to load party members", http.StatusInternalServerError)
 		return
 	}
+	upcoming, err := app.store.UpcomingPartyEvents(r.Context(), partyID, time.Now())
+	if err != nil {
+		fmt.Printf("party events error: %s\n", err)
+		http.Error(w, "unable to load party events", http.StatusInternalServerError)
+		return
+	}
+	events := make([]component.PartyEvent, 0, len(upcoming))
+	for _, event := range upcoming {
+		events = append(events, component.PartyEvent{GameName: event.GameName, StartAt: event.StartAt, EndAt: event.EndAt})
+	}
 	service := app.steamService()()
 	gamesCtx, cancelGames := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancelGames()
@@ -703,7 +715,7 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 	if err != nil {
 		fmt.Printf("shared games error: %s\n", err)
 		sharedGames = nil
-		gamesMessages = []string{"We could not load shared games right now. Please try again in a moment."}
+		gamesMessages = []string{sharedGamesUnavailable}
 	}
 	roster := make([]component.PartyMember, 0, len(members))
 	isLeader := false
@@ -741,7 +753,7 @@ func (app *application) handlePartyDetail(ctx *middleware.CustomContext, w http.
 			}
 		}
 	}
-	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates, sharedGames, gamesMessages).Render(app.pageContext(ctx), w); err != nil {
+	if err := template.PartyDetail(app.currentProfile(ctx), partyID, partyName, roster, isLeader, inviteCandidates, stepDownCandidates, sharedGames, gamesMessages, events).Render(app.pageContext(ctx), w); err != nil {
 		fmt.Printf("render error: %s\n", err)
 	}
 }
@@ -1101,6 +1113,9 @@ func (app *application) routes() http.Handler {
 	})
 	mux.HandleFunc("POST /parties/{partyID}/invites/reject", func(w http.ResponseWriter, r *http.Request) {
 		middleware.Chain(w, r, app.handleRejectInvite, auth.LoadSteamId)
+	})
+	mux.HandleFunc("POST /parties/{partyID}/events", func(w http.ResponseWriter, r *http.Request) {
+		middleware.Chain(w, r, app.handleCreatePartyEvent, auth.LoadSteamId)
 	})
 	return mux
 }

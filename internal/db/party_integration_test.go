@@ -24,7 +24,7 @@ func partyTestStore(t *testing.T) (*Store, *pgxpool.Pool, context.Context) {
 }
 
 // allTestMigrations lists every migration in the order the runner applies them.
-var allTestMigrations = []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql"}
+var allTestMigrations = []string{"0001_init.sql", "0002_parties.sql", "0003_drop_rejection_tallies.sql", "0004_games.sql", "0005_library_sync.sql", "0007_drop_google_calendar_connections.sql", "0008_party_events.sql"}
 
 // applyTestMigrations executes the named files from migrations/ in order.
 func applyTestMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool, files ...string) {
@@ -1035,5 +1035,108 @@ func TestInviteExclusions(t *testing.T) {
 	emptyExcl, err := store.InviteExclusions(ctx, party, nil)
 	if err != nil || len(emptyExcl) != 0 {
 		t.Errorf("empty friends returned %v, err %v", emptyExcl, err)
+	}
+}
+
+// partyEventFixture creates a party led by a fresh user and a stored game.
+func partyEventFixture(t *testing.T, store *Store, pool *pgxpool.Pool, ctx context.Context, steamID string) string {
+	t.Helper()
+	leader := partyTestUser(t, store, ctx, steamID)
+	party, err := store.CreateParty(ctx, leader, "Events party")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO games (app_id, name) VALUES (440, 'Team Fortress 2') ON CONFLICT (app_id) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	return party
+}
+
+// CLM-12: only events whose end is later than now are listed, earliest start
+// first, with the stored game's name; another party's events never appear.
+func TestUpcomingPartyEventsOnlyUnended(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	party := partyEventFixture(t, store, pool, ctx, "76561198000000801")
+	other := partyEventFixture(t, store, pool, ctx, "76561198000000802")
+	now := time.Date(2030, 3, 10, 12, 0, 0, 0, time.UTC)
+	insert := func(partyID string, start, end time.Time) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO party_events (party_id, game_id, start_at, end_at) SELECT $1, id, $2, $3 FROM games WHERE app_id = 440`, partyID, start, end); err != nil {
+			t.Fatal(err)
+		}
+	}
+	future := now.Add(48 * time.Hour)
+	inProgress := now.Add(-30 * time.Minute)
+	insert(party, future, future.Add(2*time.Hour))
+	insert(party, now.Add(-3*time.Hour), now.Add(-time.Hour)) // ended an hour ago
+	insert(party, inProgress, now.Add(time.Hour))
+	insert(party, now.Add(-2*time.Hour), now) // ends exactly now: not later than now
+	insert(other, future, future.Add(time.Hour))
+	events, err := store.UpcomingPartyEvents(ctx, party, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want the in-progress and future events only", events)
+	}
+	if !events[0].StartAt.Equal(inProgress) || !events[1].StartAt.Equal(future) {
+		t.Fatalf("events not the in-progress then future event: %+v", events)
+	}
+	for _, event := range events {
+		if event.GameName != "Team Fortress 2" || event.GameAppID != 440 || event.ID == "" || event.StartAt.Location() != time.UTC {
+			t.Fatalf("event fields wrong: %+v", event)
+		}
+	}
+	if empty, err := store.UpcomingPartyEvents(ctx, party, future.Add(3*time.Hour)); err != nil || len(empty) != 0 {
+		t.Fatalf("after every end: events=%+v err=%v", empty, err)
+	}
+}
+
+// CLM-10: CreatePartyEvent stores the absolute instants it is given, whatever
+// zone they carry, and an unknown app ID saves nothing.
+func TestCreatePartyEventStoresInstants(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	party := partyEventFixture(t, store, pool, ctx, "76561198000000803")
+	zone := time.FixedZone("-05:00", -5*3600)
+	start := time.Date(2030, 3, 10, 19, 0, 0, 0, zone)
+	end := time.Date(2030, 3, 10, 21, 30, 0, 0, zone)
+	if err := store.CreatePartyEvent(ctx, party, 440, start, end); err != nil {
+		t.Fatal(err)
+	}
+	var startAt, endAt time.Time
+	var appID int
+	if err := pool.QueryRow(ctx, `SELECT e.start_at, e.end_at, g.app_id FROM party_events e JOIN games g ON g.id = e.game_id WHERE e.party_id = $1`, party).Scan(&startAt, &endAt, &appID); err != nil {
+		t.Fatal(err)
+	}
+	if !startAt.Equal(time.Date(2030, 3, 11, 0, 0, 0, 0, time.UTC)) || !endAt.Equal(time.Date(2030, 3, 11, 2, 30, 0, 0, time.UTC)) || appID != 440 {
+		t.Fatalf("stored start=%s end=%s app=%d", startAt.UTC(), endAt.UTC(), appID)
+	}
+	if err := store.CreatePartyEvent(ctx, party, 999999, start, end); !errors.Is(err, ErrUnknownGame) {
+		t.Fatalf("unknown game err = %v, want ErrUnknownGame", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM party_events WHERE party_id = $1`, party).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("party_events = %d, err=%v, want 1", count, err)
+	}
+}
+
+// CLM-14: deleting a party removes its events; the table refuses an end that
+// is not after the start.
+func TestPartyEventsCascadeAndCheck(t *testing.T) {
+	store, pool, ctx := partyTestStore(t)
+	party := partyEventFixture(t, store, pool, ctx, "76561198000000804")
+	start := time.Date(2030, 3, 10, 19, 0, 0, 0, time.UTC)
+	if err := store.CreatePartyEvent(ctx, party, 440, start, start.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO party_events (party_id, game_id, start_at, end_at) SELECT $1, id, $2, $2 FROM games WHERE app_id = 440`, party, start); err == nil {
+		t.Fatal("an event whose end equals its start was saved")
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM parties WHERE id = $1`, party); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM party_events WHERE party_id = $1`, party).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("orphaned party_events = %d, err=%v", count, err)
 	}
 }

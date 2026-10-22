@@ -36,7 +36,7 @@ func TestPartyDetailSharedGamesSoloMember(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			comp := PartyDetail(player, "party-123", "Test Party", soloMembers, true, nil, nil, tc.sharedGames, tc.gamesMessages)
+			comp := PartyDetail(player, "party-123", "Test Party", soloMembers, true, nil, nil, tc.sharedGames, tc.gamesMessages, nil)
 			if err := comp.Render(context.Background(), &buf); err != nil {
 				t.Fatalf("render error: %v", err)
 			}
@@ -74,7 +74,7 @@ func TestPartyDetailSharedGamesMultipleMembers(t *testing.T) {
 
 	t.Run("empty shared games renders empty state", func(t *testing.T) {
 		var buf bytes.Buffer
-		comp := PartyDetail(player, "party-123", "Test Party", twoMembers, true, nil, nil, nil, nil)
+		comp := PartyDetail(player, "party-123", "Test Party", twoMembers, true, nil, nil, nil, nil, nil)
 		if err := comp.Render(context.Background(), &buf); err != nil {
 			t.Fatalf("render error: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestPartyDetailSharedGamesMultipleMembers(t *testing.T) {
 
 	t.Run("error messages render error alert", func(t *testing.T) {
 		var buf bytes.Buffer
-		comp := PartyDetail(player, "party-123", "Test Party", twoMembers, true, nil, nil, nil, []string{"Shared games cannot be computed."})
+		comp := PartyDetail(player, "party-123", "Test Party", twoMembers, true, nil, nil, nil, []string{"Shared games cannot be computed."}, nil)
 		if err := comp.Render(context.Background(), &buf); err != nil {
 			t.Fatalf("render error: %v", err)
 		}
@@ -145,7 +145,7 @@ func TestPageFooterShowsCopyrightAndValveDisclaimer(t *testing.T) {
 		{"Home main", renderString(t, Home(player, "t", Main))},
 		{"ErrorPage", renderString(t, ErrorPage("t", "boom"))},
 		{"PartiesPage", renderString(t, PartiesPage(player, nil, nil))},
-		{"PartyDetail", renderString(t, PartyDetail(player, "party-1", "Party", members, true, nil, nil, nil, nil))},
+		{"PartyDetail", renderString(t, PartyDetail(player, "party-1", "Party", members, true, nil, nil, nil, nil, nil))},
 		{"LeaveParty", renderString(t, LeaveParty(player, "party-1"))},
 	}
 	for _, tc := range pages {

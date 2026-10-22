@@ -44,7 +44,7 @@ func TestPersistence(t *testing.T) {
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		if _, err := pool.Exec(cleanupCtx, "DROP TABLE user_games, games, invites, memberships, parties, sessions, users"); err != nil {
+		if _, err := pool.Exec(cleanupCtx, "DROP TABLE party_events, user_games, games, invites, memberships, parties, sessions, users"); err != nil {
 			t.Errorf("cleanup: %v", err)
 		}
 	}()
@@ -406,7 +406,7 @@ func TestRecordEmptyLibrary(t *testing.T) {
 func TestStoreUserLibraryConcurrentOverlap(t *testing.T) {
 	store, pool, ctx := partyTestStore(t)
 	for iteration := 0; iteration < 10; iteration++ {
-		if _, err := pool.Exec(ctx, `TRUNCATE user_games, games`); err != nil {
+		if _, err := pool.Exec(ctx, `TRUNCATE party_events, user_games, games`); err != nil {
 			t.Fatal(err)
 		}
 		userID := gameTestUser(t, store, ctx, fmt.Sprintf("765611980000130%02d", iteration))
