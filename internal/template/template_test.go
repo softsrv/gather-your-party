@@ -433,7 +433,7 @@ func TestPartyDetailTabs(t *testing.T) {
 		if membersRadioIdx == -1 || membersPanelIdx == -1 || eventsRadioIdx == -1 || eventsPanelIdx == -1 {
 			t.Fatalf("missing radio or panel elements in tablist")
 		}
-		if !(membersRadioIdx < membersPanelIdx && membersPanelIdx < eventsRadioIdx && eventsRadioIdx < eventsPanelIdx) {
+		if membersRadioIdx >= membersPanelIdx || membersPanelIdx >= eventsRadioIdx || eventsRadioIdx >= eventsPanelIdx {
 			t.Fatalf("ordering mismatch: expected members radio < members panel < events radio < events panel")
 		}
 
